@@ -80,6 +80,12 @@ func GuestOSCustomization(results NetworkInterfaceResults) ([]vimtypes.Customiza
 			}
 		}
 
+		// When only IPv6 is configured (no IPv4 addresses, no DHCP4), the vSphere API
+		// requires adapter.Ip to be set. Set it to DHCP as a fallback.
+		if adapter.Ip == nil && !r.NoIPAM && (adapter.IpV6Spec != nil || r.DHCP6) {
+			adapter.Ip = &vimtypes.CustomizationDhcpIpGenerator{}
+		}
+
 		mappings = append(mappings, vimtypes.CustomizationAdapterMapping{
 			MacAddress: r.MacAddress,
 			Adapter:    adapter,
