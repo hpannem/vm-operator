@@ -9,6 +9,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/go-logr/logr"
 
 	vimtypes "github.com/vmware/govmomi/vim25/types"
 
@@ -42,7 +43,7 @@ var _ = Describe("GOSC", func() {
 		})
 
 		JustBeforeEach(func() {
-			adapterMappings, err = network.GuestOSCustomization(results)
+			adapterMappings, err = network.GuestOSCustomization(results, logr.Discard())
 		})
 
 		Context("IPv4/6 Static adapter", func() {
