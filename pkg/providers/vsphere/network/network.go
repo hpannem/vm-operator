@@ -204,8 +204,6 @@ func applyInterfaceSpecToResult(
 		result.DHCP4 = true
 	}
 	if interfaceSpec.DHCP6 {
-		// We don't really support IPv6 yet so this is only enabled when specified in
-		// the interface spec.
 		result.DHCP6 = true
 	}
 
@@ -460,10 +458,38 @@ func netOpNetIfToResult(
 
 	switch netIf.Status.IPAssignmentMode {
 	case netopv1alpha1.NetworkInterfaceIPAssignmentModeDHCP:
-		result.DHCP4 = true
+		// Check IPConfigs to determine which IP families are configured for DHCP.
+		// If IPConfigs are present, they indicate which IP families are available.
+		// If empty, default to IPv4 for backward compatibility.
+		hasIPv4 := false
+		hasIPv6 := false
+		for _, ip := range netIf.Status.IPConfigs {
+			if ip.IPFamily == corev1.IPv4Protocol {
+				hasIPv4 = true
+			} else {
+				hasIPv6 = true
+			}
+		}
+		// If no IPConfigs are present, default to IPv4 for backward compatibility.
+		// Otherwise, set DHCP based on available IP families.
+		if len(netIf.Status.IPConfigs) == 0 {
+			result.DHCP4 = true
+		} else {
+			if hasIPv4 {
+				result.DHCP4 = true
+			}
+			if hasIPv6 {
+				result.DHCP6 = true
+			}
+		}
 	case netopv1alpha1.NetworkInterfaceIPAssignmentModeNone:
 		result.NoIPAM = true
 	default: // netopv1alpha1.NetworkInterfaceIPAssignmentModeStaticPool
+		// Process all IPConfigs (both IPv4 and IPv6). This correctly handles:
+		// - IPv4-only scenarios (only IPv4 IPConfigs)
+		// - IPv6-only scenarios (only IPv6 IPConfigs)
+		// - Dual-stack scenarios (both IPv4 and IPv6 IPConfigs)
+		// DHCP4/DHCP6 are not set in StaticPool mode, only IPConfigs are populated.
 		for _, ip := range netIf.Status.IPConfigs {
 			ipConfig := NetworkInterfaceIPConfig{
 				IPCIDR:  ipCIDRNotation(ip.IP, ip.SubnetMask, ip.IPFamily == corev1.IPv4Protocol),
