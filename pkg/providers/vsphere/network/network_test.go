@@ -462,7 +462,7 @@ var _ = Describe("CreateAndWaitForNetworkInterfaces", Label(testlabels.VCSim), f
 					Expect(results.Results).To(HaveLen(1))
 					result := results.Results[0]
 					Expect(result.DHCP4).To(BeTrue())
-					Expect(result.DHCP6).To(BeFalse())
+					Expect(result.DHCP6).To(BeTrue()) // Both should be set when NetOP indicates DHCP
 					Expect(result.NoIPAM).To(BeFalse())
 					Expect(result.IPConfigs).To(BeEmpty())
 				})

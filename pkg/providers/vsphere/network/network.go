@@ -200,6 +200,10 @@ func applyInterfaceSpecToResult(
 		result.MTU = *interfaceSpec.MTU
 	}
 
+	// TODO: There is currently no way to unset DHCP flags if NetOP has set them.
+	// For example, if NetOP sets both DHCP4 and DHCP6, but user only wants DHCP4,
+	// they cannot disable DHCP6. Consider adding explicit unset mechanism (e.g.,
+	// using pointer types or separate "disable" flags) in the future.
 	if interfaceSpec.DHCP4 {
 		result.DHCP4 = true
 	}
@@ -458,30 +462,11 @@ func netOpNetIfToResult(
 
 	switch netIf.Status.IPAssignmentMode {
 	case netopv1alpha1.NetworkInterfaceIPAssignmentModeDHCP:
-		// Check IPConfigs to determine which IP families are configured for DHCP.
-		// If IPConfigs are present, they indicate which IP families are available.
-		// If empty, default to IPv4 for backward compatibility.
-		hasIPv4 := false
-		hasIPv6 := false
-		for _, ip := range netIf.Status.IPConfigs {
-			if ip.IPFamily == corev1.IPv4Protocol {
-				hasIPv4 = true
-			} else {
-				hasIPv6 = true
-			}
-		}
-		// If no IPConfigs are present, default to IPv4 for backward compatibility.
-		// Otherwise, set DHCP based on available IP families.
-		if len(netIf.Status.IPConfigs) == 0 {
-			result.DHCP4 = true
-		} else {
-			if hasIPv4 {
-				result.DHCP4 = true
-			}
-			if hasIPv6 {
-				result.DHCP6 = true
-			}
-		}
+		// When NetOP indicates DHCP, IPConfigs will be empty.
+		// Since NetOP doesn't distinguish between IPv4 and IPv6, set both.
+		// User's interface spec can override either or both flags.
+		result.DHCP4 = true
+		result.DHCP6 = true
 	case netopv1alpha1.NetworkInterfaceIPAssignmentModeNone:
 		result.NoIPAM = true
 	default: // netopv1alpha1.NetworkInterfaceIPAssignmentModeStaticPool
