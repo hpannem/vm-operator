@@ -6,10 +6,9 @@
 tc001_ipv6_only() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc001-ipv6-only"
     
@@ -48,10 +47,9 @@ EOF
 tc002_dual_stack() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc002-dual-stack"
     
@@ -98,10 +96,9 @@ EOF
 tc003_dual_stack_wait_network() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc003-dual-stack-wait-network"
     
@@ -147,10 +144,9 @@ EOF
 tc004_multiple_ipv6() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc004-multiple-ipv6"
     
@@ -189,10 +185,9 @@ EOF
 tc005_dual_stack_multi_ipv6() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc005-dual-stack-multi-ipv6"
     

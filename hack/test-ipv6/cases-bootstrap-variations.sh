@@ -6,10 +6,9 @@
 tc014_gosc_ipv6_only() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc014-gosc-ipv6-only"
     
@@ -49,10 +48,9 @@ EOF
 tc015_gosc_dual_stack() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc015-gosc-dual-stack"
     
@@ -99,10 +97,9 @@ EOF
 tc016_gosc_dhcp4_dhcp6() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc016-gosc-dhcp4-dhcp6"
     
@@ -141,10 +138,9 @@ EOF
 tc017_gosc_dhcp4_static_ipv6() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc017-gosc-dhcp4-static-ipv6"
     
@@ -185,10 +181,9 @@ EOF
 tc018_gosc_static_ipv4_dhcp6() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc018-gosc-static-ipv4-dhcp6"
     
@@ -229,10 +224,9 @@ EOF
 tc019_cloudinit_multiple_addresses() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc019-cloudinit-multiple-addresses"
     

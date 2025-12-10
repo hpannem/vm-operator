@@ -6,10 +6,9 @@
 tc006_noipam() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc006-noipam"
     

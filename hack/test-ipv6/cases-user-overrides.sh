@@ -6,10 +6,9 @@
 tc007_user_addresses_override() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc007-user-addresses-override"
     
@@ -51,10 +50,9 @@ EOF
 tc008_user_gateways_override() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc008-user-gateways-override"
     
@@ -98,10 +96,9 @@ EOF
 tc009_gateway_none() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc009-gateway-none"
     
@@ -145,10 +142,9 @@ EOF
 tc010_dhcp6_override() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc010-dhcp6-override"
     
@@ -191,10 +187,9 @@ EOF
 tc011_dhcp4_dhcp6_override() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc011-dhcp4-dhcp6-override"
     
@@ -235,10 +230,9 @@ EOF
 tc012_gateway_backfill() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc012-gateway-backfill"
     
@@ -280,10 +274,9 @@ EOF
 tc013_netop_addresses_user_gateways() {
     local namespace="$1"
     local primary_network="$2"
-    local secondary_network="$3"
-    local vmi_id="$4"
-    local vm_class="$5"
-    local storage_class="$6"
+    local vmi_id="$3"
+    local vm_class="$4"
+    local storage_class="$5"
     
     local vm_name="tc013-netop-addresses-user-gateways"
     

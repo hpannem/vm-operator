@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 
-# Category 6: Edge Cases Test Cases
+# Category 7: Primary IPv4 + Secondary Network Test Cases
 
-# TC-020: No Gateways Specified
-tc020_no_gateways() {
+# TC-024: Primary IPv4 + Secondary IPv6 StaticPool
+tc024_primary_ipv4_secondary_ipv6() {
     local namespace="$1"
     local primary_network="$2"
-    local vmi_id="$3"
-    local vm_class="$4"
-    local storage_class="$5"
-    
-    local vm_name="tc020-no-gateways"
-    
+    local secondary_network="$3"
+    local vmi_id="$4"
+    local vm_class="$5"
+    local storage_class="$6"
+
+    local vm_name="tc024-primary-ipv4-secondary-ipv6"
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -28,9 +29,9 @@ spec:
     - name: eth0
       network:
         name: $primary_network
-      addresses:
-      - "192.168.1.100/24"
-      - "2001:db8::100/64"
+    - name: eth1
+      network:
+        name: $secondary_network
   bootstrap:
     cloudInit:
       cloudConfig:
@@ -46,16 +47,17 @@ spec:
 EOF
 }
 
-# TC-021: IPv6-Only with Multiple Addresses and Gateways
-tc021_ipv6_only_multiple() {
+# TC-025: Primary IPv4 + Secondary Dual-Stack StaticPool
+tc025_primary_ipv4_secondary_dual_stack() {
     local namespace="$1"
     local primary_network="$2"
-    local vmi_id="$3"
-    local vm_class="$4"
-    local storage_class="$5"
-    
-    local vm_name="tc021-ipv6-only-multiple"
-    
+    local secondary_network="$3"
+    local vmi_id="$4"
+    local vm_class="$5"
+    local storage_class="$6"
+
+    local vm_name="tc025-primary-ipv4-secondary-dual-stack"
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -68,14 +70,20 @@ spec:
   storageClass: $storage_class
   powerState: PoweredOn
   network:
+    hostName: primary-ipv4-secondary-dual-stack
+    domainName: example.com
+    nameservers:
+    - "8.8.8.8"
+    - "2001:4860:4860::8888"
+    searchDomains:
+    - "example.com"
     interfaces:
     - name: eth0
       network:
         name: $primary_network
-      addresses:
-      - "2001:db8::100/64"
-      - "2001:db8::101/64"
-      gateway6: "2001:db8::1"
+    - name: eth1
+      network:
+        name: $secondary_network
   bootstrap:
     cloudInit:
       cloudConfig:
@@ -91,16 +99,17 @@ spec:
 EOF
 }
 
-# TC-022: User Override with Partial Gateway Backfill
-tc022_partial_gateway_backfill() {
+# TC-026: Primary IPv4 + Secondary NoIPAM
+tc026_primary_ipv4_secondary_noipam() {
     local namespace="$1"
     local primary_network="$2"
-    local vmi_id="$3"
-    local vm_class="$4"
-    local storage_class="$5"
-    
-    local vm_name="tc022-partial-gateway-backfill"
-    
+    local secondary_network="$3"
+    local vmi_id="$4"
+    local vm_class="$5"
+    local storage_class="$6"
+
+    local vm_name="tc026-primary-ipv4-secondary-noipam"
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -117,9 +126,9 @@ spec:
     - name: eth0
       network:
         name: $primary_network
-      addresses:
-      - "192.168.1.100/24"
-      - "2001:db8::100/64"
+    - name: eth1
+      network:
+        name: $secondary_network
   bootstrap:
     cloudInit:
       cloudConfig:
@@ -135,16 +144,17 @@ spec:
 EOF
 }
 
-# TC-023: Dual-Stack with Different Subnet Masks
-tc023_different_subnets() {
+# TC-027: Primary IPv4 + Secondary DHCP
+tc027_primary_ipv4_secondary_dhcp() {
     local namespace="$1"
     local primary_network="$2"
-    local vmi_id="$3"
-    local vm_class="$4"
-    local storage_class="$5"
-    
-    local vm_name="tc023-different-subnets"
-    
+    local secondary_network="$3"
+    local vmi_id="$4"
+    local vm_class="$5"
+    local storage_class="$6"
+
+    local vm_name="tc027-primary-ipv4-secondary-dhcp"
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -157,15 +167,20 @@ spec:
   storageClass: $storage_class
   powerState: PoweredOn
   network:
+    hostName: primary-ipv4-secondary-dhcp
+    domainName: example.com
+    nameservers:
+    - "8.8.8.8"
+    - "2001:4860:4860::8888"
+    searchDomains:
+    - "example.com"
     interfaces:
     - name: eth0
       network:
         name: $primary_network
-      addresses:
-      - "192.168.1.100/16"
-      - "2001:db8::100/56"
-      gateway4: "192.168.1.1"
-      gateway6: "2001:db8::1"
+    - name: eth1
+      network:
+        name: $secondary_network
   bootstrap:
     cloudInit:
       cloudConfig:
