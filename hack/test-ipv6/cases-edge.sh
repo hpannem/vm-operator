@@ -9,9 +9,9 @@ tc020_no_gateways() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc020-no-gateways"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -53,9 +53,9 @@ tc021_ipv6_only_multiple() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc021-ipv6-only-multiple"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -98,9 +98,9 @@ tc022_partial_gateway_backfill() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc022-partial-gateway-backfill"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -142,9 +142,9 @@ tc023_different_subnets() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc023-different-subnets"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine

@@ -9,9 +9,9 @@ tc001_ipv6_only() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc001-ipv6-only"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -50,9 +50,9 @@ tc002_dual_stack() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc002-dual-stack"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -99,9 +99,9 @@ tc003_dual_stack_wait_network() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc003-dual-stack-wait-network"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -147,9 +147,9 @@ tc004_multiple_ipv6() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc004-multiple-ipv6"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -188,9 +188,9 @@ tc005_dual_stack_multi_ipv6() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc005-dual-stack-multi-ipv6"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine

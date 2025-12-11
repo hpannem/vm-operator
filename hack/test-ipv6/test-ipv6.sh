@@ -122,37 +122,38 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate required arguments
-# Test case registry: TC_ID|TC_NAME|BOOTSTRAP|IP_FAMILY|DHCP_CONFIG|FUNCTION|NETWORK_CATEGORY|CATEGORY_NAME|INTERFACE_IP_FAMILIES
-# INTERFACE_IP_FAMILIES: Format "eth0:IP_FAMILY" for single interface or "eth0:IP_FAMILY eth1:IP_FAMILY" for multi-interface
-# If empty, defaults to "eth0:IP_FAMILY" using the IP_FAMILY field
-declare -a ALL_TEST_CASES=(
-    "TC-001|IPv6-Only StaticPool from NetOP|Cloud-Init|IPv6-only|none|tc001_ipv6_only|StaticPool|Category 1: NetOP StaticPool Mode|"
-    "TC-002|Dual-Stack StaticPool from NetOP|Cloud-Init|Dual-stack|none|tc002_dual_stack|StaticPool|Category 1: NetOP StaticPool Mode|"
-    "TC-003|Dual-Stack with WaitOnNetwork|Cloud-Init|Dual-stack|none|tc003_dual_stack_wait_network|StaticPool|Category 1: NetOP StaticPool Mode|"
-    "TC-004|Multiple IPv6 Addresses StaticPool|Cloud-Init|IPv6-only|none|tc004_multiple_ipv6|StaticPool|Category 1: NetOP StaticPool Mode|"
-    "TC-005|Dual-Stack with Multiple IPv6|Cloud-Init|Dual-stack|none|tc005_dual_stack_multi_ipv6|StaticPool|Category 1: NetOP StaticPool Mode|"
-    "TC-006|NoIPAM Mode from NetOP|Cloud-Init|N/A|none|tc006_noipam|NoIPAM|Category 3: NetOP None Mode|"
-    "TC-007|User Addresses Override NetOP|Cloud-Init|Dual-stack|none|tc007_user_addresses_override|StaticPool|Category 4: User-Specified Overrides|"
-    "TC-008|User Gateways Override NetOP|Cloud-Init|Dual-stack|none|tc008_user_gateways_override|StaticPool|Category 4: User-Specified Overrides|"
-    "TC-009|User Gateways None Clears NetOP|Cloud-Init|Dual-stack|none|tc009_gateway_none|StaticPool|Category 4: User-Specified Overrides|"
-    "TC-010|User DHCP6 Overrides NetOP|Cloud-Init|IPv6-only|static+dhcp6|tc010_dhcp6_override|DHCP|Category 4: User-Specified Overrides|"
-    "TC-011|User DHCP4 + DHCP6 Override|Cloud-Init|Dual-stack|dhcp4+dhcp6|tc011_dhcp4_dhcp6_override|DHCP|Category 4: User-Specified Overrides|"
-    "TC-012|User Addresses + NetOP Gateways|Cloud-Init|Dual-stack|none|tc012_gateway_backfill|StaticPool|Category 4: User-Specified Overrides|"
-    "TC-013|NetOP Addresses + User Gateways|Cloud-Init|Dual-stack|none|tc013_netop_addresses_user_gateways|StaticPool|Category 4: User-Specified Overrides|"
-    "TC-014|GOSC IPv6-Only Static|GOSC|IPv6-only|none|tc014_gosc_ipv6_only|StaticPool|Category 5: Bootstrap Provider Variations|"
-    "TC-015|GOSC Dual-Stack Static|GOSC|Dual-stack|none|tc015_gosc_dual_stack|StaticPool|Category 5: Bootstrap Provider Variations|"
-    "TC-016|GOSC DHCP4 + DHCP6|GOSC|Dual-stack|dhcp4+dhcp6|tc016_gosc_dhcp4_dhcp6|DHCP|Category 5: Bootstrap Provider Variations|"
-    "TC-017|GOSC DHCP4 + Static IPv6|GOSC|Dual-stack|static+dhcp4|tc017_gosc_dhcp4_static_ipv6|DHCP|Category 5: Bootstrap Provider Variations|"
-    "TC-018|GOSC Static IPv4 + DHCP6|GOSC|Dual-stack|static+dhcp6|tc018_gosc_static_ipv4_dhcp6|DHCP|Category 5: Bootstrap Provider Variations|"
-    "TC-019|Cloud-Init Dual-Stack Multiple Addresses|Cloud-Init|Dual-stack|none|tc019_cloudinit_multiple_addresses|StaticPool|Category 5: Bootstrap Provider Variations|"
-    "TC-020|No Gateways Specified|Cloud-Init|Dual-stack|none|tc020_no_gateways|StaticPool|Category 6: Edge Cases|"
-    "TC-021|IPv6-Only with Multiple Addresses|Cloud-Init|IPv6-only|none|tc021_ipv6_only_multiple|StaticPool|Category 6: Edge Cases|"
-    "TC-022|User Override Partial Gateway Backfill|Cloud-Init|Dual-stack|none|tc022_partial_gateway_backfill|StaticPool|Category 6: Edge Cases|"
-    "TC-023|Dual-Stack Different Subnets|Cloud-Init|Dual-stack|none|tc023_different_subnets|StaticPool|Category 6: Edge Cases|"
-    "TC-024|Primary IPv4 + Secondary IPv6|Cloud-Init|Multi-interface|none|tc024_primary_ipv4_secondary_ipv6|StaticPool|Category 7: Primary IPv4 + Secondary Network|eth0:IPv4-only eth1:IPv6-only"
-    "TC-025|Primary IPv4 + Secondary Dual-Stack|Cloud-Init|Dual-stack|none|tc025_primary_ipv4_secondary_dual_stack|StaticPool|Category 7: Primary IPv4 + Secondary Network|eth0:IPv4-only eth1:Dual-stack"
-    "TC-026|Primary IPv4 + Secondary NoIPAM|Cloud-Init|Dual-stack|none|tc026_primary_ipv4_secondary_noipam|NoIPAM|Category 7: Primary IPv4 + Secondary Network|eth0:IPv4-only eth1:N/A"
-    "TC-027|Primary IPv4 + Secondary DHCP|Cloud-Init|Dual-stack|dhcp4+dhcp6|tc027_primary_ipv4_secondary_dhcp|DHCP|Category 7: Primary IPv4 + Secondary Network|eth0:IPv4-only eth1:Dual-stack"
+  # Test case registry: TC_ID|TC_NAME|BOOTSTRAP|IP_FAMILY|DHCP_CONFIG|FUNCTION|NETWORK_CATEGORY|CATEGORY_NAME|INTERFACE_IP_FAMILIES
+  # INTERFACE_IP_FAMILIES: Format "eth0:IP_FAMILY:COUNT" for single interface or "eth0:IP_FAMILY:COUNT eth1:IP_FAMILY:COUNT" for multi-interface
+  # COUNT is optional, defaults to 1 if not specified. Examples: "eth0:IPv6-only:2" (expects 2 IPv6 addresses) or "eth0:IPv4-only" (expects 1 IPv4 address)
+  # If empty, defaults to "eth0:IP_FAMILY:1" using the IP_FAMILY field
+  declare -a ALL_TEST_CASES=(
+      "TC-001|IPv6-Only StaticPool from NetOP|Cloud-Init|IPv6-only|none|tc001_ipv6_only|StaticPool|Category 1: NetOP StaticPool Mode|eth0:IPv6-only:1"
+      "TC-002|Dual-Stack StaticPool from NetOP|Cloud-Init|Dual-stack|none|tc002_dual_stack|StaticPool|Category 1: NetOP StaticPool Mode|eth0:Dual-stack:1"
+      "TC-003|Dual-Stack with WaitOnNetwork|Cloud-Init|Dual-stack|none|tc003_dual_stack_wait_network|StaticPool|Category 1: NetOP StaticPool Mode|eth0:Dual-stack:1"
+      "TC-004|Multiple IPv6 Addresses StaticPool|Cloud-Init|IPv6-only|none|tc004_multiple_ipv6|StaticPool|Category 1: NetOP StaticPool Mode|eth0:IPv6-only:2"
+      "TC-005|Dual-Stack with Multiple IPv6|Cloud-Init|Dual-stack|none|tc005_dual_stack_multi_ipv6|StaticPool|Category 1: NetOP StaticPool Mode|eth0:Dual-stack:2"
+      "TC-006|NoIPAM Mode from NetOP|Cloud-Init|N/A|none|tc006_noipam|NoIPAM|Category 3: NetOP None Mode|eth0:N/A:0"
+      "TC-007|User Addresses Override NetOP|Cloud-Init|Dual-stack|none|tc007_user_addresses_override|StaticPool|Category 4: User-Specified Overrides|eth0:Dual-stack:1"
+      "TC-008|User Gateways Override NetOP|Cloud-Init|Dual-stack|none|tc008_user_gateways_override|StaticPool|Category 4: User-Specified Overrides|eth0:Dual-stack:1"
+      "TC-009|User Gateways None Clears NetOP|Cloud-Init|Dual-stack|none|tc009_gateway_none|StaticPool|Category 4: User-Specified Overrides|eth0:Dual-stack:1"
+      "TC-010|User DHCP6 Overrides NetOP|Cloud-Init|IPv6-only|static+dhcp6|tc010_dhcp6_override|DHCP|Category 4: User-Specified Overrides|eth0:IPv6-only:1"
+      "TC-011|User DHCP4 + DHCP6 Override|Cloud-Init|Dual-stack|dhcp4+dhcp6|tc011_dhcp4_dhcp6_override|DHCP|Category 4: User-Specified Overrides|eth0:Dual-stack:1"
+      "TC-012|User Addresses + NetOP Gateways|Cloud-Init|Dual-stack|none|tc012_gateway_backfill|StaticPool|Category 4: User-Specified Overrides|eth0:Dual-stack:1"
+      "TC-013|NetOP Addresses + User Gateways|Cloud-Init|Dual-stack|none|tc013_netop_addresses_user_gateways|StaticPool|Category 4: User-Specified Overrides|eth0:Dual-stack:1"
+      "TC-014|GOSC IPv6-Only Static|GOSC|IPv6-only|none|tc014_gosc_ipv6_only|StaticPool|Category 5: Bootstrap Provider Variations|eth0:IPv6-only:1"
+      "TC-015|GOSC Dual-Stack Static|GOSC|Dual-stack|none|tc015_gosc_dual_stack|StaticPool|Category 5: Bootstrap Provider Variations|eth0:Dual-stack:1"
+      "TC-016|GOSC DHCP4 + DHCP6|GOSC|Dual-stack|dhcp4+dhcp6|tc016_gosc_dhcp4_dhcp6|DHCP|Category 5: Bootstrap Provider Variations|eth0:Dual-stack:1"
+      "TC-017|GOSC DHCP4 + Static IPv6|GOSC|Dual-stack|static+dhcp4|tc017_gosc_dhcp4_static_ipv6|DHCP|Category 5: Bootstrap Provider Variations|eth0:Dual-stack:1"
+      "TC-018|GOSC Static IPv4 + DHCP6|GOSC|Dual-stack|static+dhcp6|tc018_gosc_static_ipv4_dhcp6|DHCP|Category 5: Bootstrap Provider Variations|eth0:Dual-stack:1"
+      "TC-019|Cloud-Init Dual-Stack Multiple Addresses|Cloud-Init|Dual-stack|none|tc019_cloudinit_multiple_addresses|StaticPool|Category 5: Bootstrap Provider Variations|eth0:Dual-stack:4"
+      "TC-020|No Gateways Specified|Cloud-Init|Dual-stack|none|tc020_no_gateways|StaticPool|Category 6: Edge Cases|eth0:Dual-stack:1"
+      "TC-021|IPv6-Only with Multiple Addresses|Cloud-Init|IPv6-only|none|tc021_ipv6_only_multiple|StaticPool|Category 6: Edge Cases|eth0:IPv6-only:2"
+      "TC-022|User Override Partial Gateway Backfill|Cloud-Init|Dual-stack|none|tc022_partial_gateway_backfill|StaticPool|Category 6: Edge Cases|eth0:Dual-stack:1"
+      "TC-023|Dual-Stack Different Subnets|Cloud-Init|Dual-stack|none|tc023_different_subnets|StaticPool|Category 6: Edge Cases|eth0:Dual-stack:1"
+      "TC-024|Primary IPv4 + Secondary IPv6|Cloud-Init|Multi-interface|none|tc024_primary_ipv4_secondary_ipv6|StaticPool|Category 7: Primary IPv4 + Secondary Network|eth0:IPv4-only:1 eth1:IPv6-only:1"
+      "TC-025|Primary IPv4 + Secondary Dual-Stack|Cloud-Init|Dual-stack|none|tc025_primary_ipv4_secondary_dual_stack|StaticPool|Category 7: Primary IPv4 + Secondary Network|eth0:IPv4-only:1 eth1:Dual-stack:1"
+      "TC-026|Primary IPv4 + Secondary NoIPAM|Cloud-Init|Dual-stack|none|tc026_primary_ipv4_secondary_noipam|NoIPAM|Category 7: Primary IPv4 + Secondary Network|eth0:IPv4-only:1 eth1:N/A:0"
+      "TC-027|Primary IPv4 + Secondary DHCP|Cloud-Init|Dual-stack|dhcp4+dhcp6|tc027_primary_ipv4_secondary_dhcp|DHCP|Category 7: Primary IPv4 + Secondary Network|eth0:IPv4-only:1 eth1:Dual-stack:1"
 )
 
 # Handle --list early (doesn't need other args)
@@ -493,10 +494,10 @@ run_test_case() {
     fi
 
     # Verify network configuration
-    # Use interface_configs from test case registry, or default to eth0 with test case IP family
+    # Use interface_configs from test case registry, or default to eth0 with test case IP family and count 1
     local interface_expected_families="$interface_configs"
     if [[ -z "$interface_expected_families" ]]; then
-        interface_expected_families="eth0:$ip_family"
+        interface_expected_families="eth0:$ip_family:1"
     fi
 
     local verify_result=""

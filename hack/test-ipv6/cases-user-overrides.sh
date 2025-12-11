@@ -9,9 +9,9 @@ tc007_user_addresses_override() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc007-user-addresses-override"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -53,9 +53,9 @@ tc008_user_gateways_override() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc008-user-gateways-override"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -99,9 +99,9 @@ tc009_gateway_none() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc009-gateway-none"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -145,9 +145,9 @@ tc010_dhcp6_override() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc010-dhcp6-override"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -190,9 +190,9 @@ tc011_dhcp4_dhcp6_override() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc011-dhcp4-dhcp6-override"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -233,9 +233,9 @@ tc012_gateway_backfill() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc012-gateway-backfill"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -277,9 +277,9 @@ tc013_netop_addresses_user_gateways() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc013-netop-addresses-user-gateways"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine

@@ -2,8 +2,10 @@
 
 # Helper function library for IPv6 integration tests
 
-# VM Condition constant
-readonly VM_NETWORK_CONDITION="VirtualMachineGuestNetworkConfigSynced"
+# VM Condition constant (only set if not already set to avoid readonly error on re-source)
+if [[ -z "${VM_NETWORK_CONDITION:-}" ]]; then
+    readonly VM_NETWORK_CONDITION="VirtualMachineGuestNetworkConfigSynced"
+fi
 
 # Colors for output (if not already defined)
 if [[ -z "${RED:-}" ]]; then
@@ -405,22 +407,50 @@ collect_full_diagnostics() {
     echo -e "$output"
 }
 
-# Verify a specific interface has the expected IP family
+# Verify a specific interface has the expected IP family and address count
+# expected_config format: "IP_FAMILY:COUNT" (e.g., "IPv6-only:2" or "Dual-stack:1")
+# COUNT is optional, defaults to 1 if not specified
 verify_interface_ip_family() {
     local vm_name="$1"
     local namespace="$2"
     local interface_name="$3"
-    local expected_ip_family="$4"
+    local expected_config="$4"  # Format: "IP_FAMILY:COUNT" or just "IP_FAMILY"
     local max_retries="${5:-10}"
     local retry_delay="${6:-3}"
     local quiet="${7:-false}"
+
+    # Parse expected_config to extract IP family and count
+    local expected_ip_family
+    local expected_count=1
+    if [[ "$expected_config" =~ : ]]; then
+        # Format: "IP_FAMILY:COUNT"
+        expected_ip_family="${expected_config%%:*}"
+        expected_count="${expected_config##*:}"
+        # Validate count is a number
+        if ! [[ "$expected_count" =~ ^[0-9]+$ ]]; then
+            echo "Invalid expected count: $expected_count (must be a number)"
+            return 1
+        fi
+    else
+        # Format: "IP_FAMILY" (default count is 1)
+        expected_ip_family="$expected_config"
+    fi
 
     # Get IP addresses for this interface
     # Parameters: vm_name, namespace, max_retries, retry_delay, quiet, interface_name
     local interface_ips
     interface_ips=$(get_vm_ip_addresses "$vm_name" "$namespace" "$max_retries" "$retry_delay" "$quiet" "$interface_name")
 
-    if [[ -z "$interface_ips" ]] && [[ "$expected_ip_family" != "N/A" ]]; then
+    # For N/A (NoIPAM), expect no IPs (count should be 0)
+    if [[ "$expected_ip_family" == "N/A" ]]; then
+        if [[ -n "$interface_ips" ]]; then
+            echo "$interface_name expected no IP addresses (NoIPAM) but found: $(echo "$interface_ips" | tr '\n' ',' | sed 's/,$//')"
+            return 1
+        fi
+        return 0
+    fi
+
+    if [[ -z "$interface_ips" ]]; then
         # Debug: Check if interface exists in VM status
         local interface_exists
         interface_exists=$(kubectl get vm "$vm_name" -n "$namespace" -o jsonpath="{.status.network.interfaces[?(@.name==\"$interface_name\")].name}" 2>/dev/null)
@@ -459,16 +489,30 @@ verify_interface_ip_family() {
         return 1
     fi
 
+    # Verify address count matches expected
+    local ip_count=0
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] && ((ip_count++))
+    done <<< "$interface_ips"
+
+    if [[ $ip_count -ne $expected_count ]]; then
+        echo "$interface_name address count mismatch - Expected: $expected_count, Got: $ip_count"
+        if [[ -n "$interface_ips" ]]; then
+            echo "$interface_name IPs: $(echo "$interface_ips" | tr '\n' ',' | sed 's/,$//')"
+        fi
+        return 1
+    fi
+
     return 0
 }
 
 # Verify VM network configuration
-# interface_expected_families: space-separated list of "interface:expected_family" pairs
-# Example: "eth0:IPv4-only eth1:Dual-stack" or "eth0:IPv6-only"
+# interface_expected_families: space-separated list of "interface:IP_FAMILY:COUNT" pairs
+# Example: "eth0:IPv4-only:1 eth1:Dual-stack:2" or "eth0:IPv6-only:1" or "eth0:IPv6-only" (count defaults to 1)
 verify_vm_network() {
     local vm_name="$1"
     local namespace="$2"
-    local interface_expected_families="$3"  # Format: "eth0:IPv4-only eth1:Dual-stack" or "eth0:IPv6-only"
+    local interface_expected_families="$3"  # Format: "eth0:IPv4-only:1 eth1:Dual-stack:2" or "eth0:IPv6-only"
     local expected_dhcp_config="${4:-none}"
 
     # Check VM Network Config Synced
@@ -485,11 +529,21 @@ verify_vm_network() {
         return 1
     fi
 
-    # Verify each interface with its expected IP family
+    # Verify each interface with its expected IP family and count
     local interface_config
     for interface_config in $interface_expected_families; do
-        IFS=':' read -r interface_name expected_family <<< "$interface_config"
-        if ! verify_interface_ip_family "$vm_name" "$namespace" "$interface_name" "$expected_family" 10 3 false; then
+        # Parse interface:family:count or interface:family (count defaults to 1)
+        local interface_name
+        local expected_config
+        if [[ "$interface_config" =~ ^([^:]+):(.+)$ ]]; then
+            interface_name="${BASH_REMATCH[1]}"
+            expected_config="${BASH_REMATCH[2]}"
+        else
+            echo "Invalid interface config format: $interface_config (expected format: interface:family:count or interface:family)"
+            return 1
+        fi
+
+        if ! verify_interface_ip_family "$vm_name" "$namespace" "$interface_name" "$expected_config" 10 3 false; then
             return 1
         fi
     done

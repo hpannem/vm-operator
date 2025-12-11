@@ -9,9 +9,9 @@ tc006_noipam() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc006-noipam"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine

@@ -9,9 +9,9 @@ tc014_gosc_ipv6_only() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc014-gosc-ipv6-only"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -51,9 +51,9 @@ tc015_gosc_dual_stack() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc015-gosc-dual-stack"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -100,9 +100,9 @@ tc016_gosc_dhcp4_dhcp6() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc016-gosc-dhcp4-dhcp6"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -141,9 +141,9 @@ tc017_gosc_dhcp4_static_ipv6() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc017-gosc-dhcp4-static-ipv6"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -184,9 +184,9 @@ tc018_gosc_static_ipv4_dhcp6() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc018-gosc-static-ipv4-dhcp6"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
@@ -227,9 +227,9 @@ tc019_cloudinit_multiple_addresses() {
     local vmi_id="$3"
     local vm_class="$4"
     local storage_class="$5"
-    
+
     local vm_name="tc019-cloudinit-multiple-addresses"
-    
+
     cat <<EOF
 apiVersion: vmoperator.vmware.com/v1alpha5
 kind: VirtualMachine
