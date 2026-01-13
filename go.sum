@@ -1,3 +1,5 @@
+github-vcf.devops.broadcom.net/vcf/ny036812-mirrors_vmware-tanzu_net-operator-api v0.0.0-20260113071009-7c9c123bc0bf h1:805ZBqH/3D2Y2+WzQqL08gGxRNoZPXwAIvoWapcdvLE=
+github-vcf.devops.broadcom.net/vcf/ny036812-mirrors_vmware-tanzu_net-operator-api v0.0.0-20260113071009-7c9c123bc0bf/go.mod h1:w6QJGm3crIA16ZIz1FVQXD2NVeJhOgGXxW05RbVTSTo=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
@@ -120,8 +122,6 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/vmware-tanzu/image-registry-operator-api v0.0.0-20250624211456-dfc90459c658 h1:JJg5zTkKLyCQDcKJpuOGiZM2aqQ7NWe5VJT+H9lpQrE=
 github.com/vmware-tanzu/image-registry-operator-api v0.0.0-20250624211456-dfc90459c658/go.mod h1:sh4NJb1tCbzNRJ+ajRuu3thDovFN10Hic2wYmyklG/M=
-github.com/vmware-tanzu/net-operator-api v0.0.0-20250826165015-90a4bb21727b h1:4LXcpS7olGK7vDtzpkSoGMvkFYm0HNdzMqJxnTiv0sY=
-github.com/vmware-tanzu/net-operator-api v0.0.0-20250826165015-90a4bb21727b/go.mod h1:w6QJGm3crIA16ZIz1FVQXD2NVeJhOgGXxW05RbVTSTo=
 github.com/vmware-tanzu/nsx-operator/pkg/apis v0.0.0-20250813103855-288a237381b5 h1:OUPe+BjC/XWqHRWYHDCtTa/lZpEz6U8YmZcZi1Rp5BU=
 github.com/vmware-tanzu/nsx-operator/pkg/apis v0.0.0-20250813103855-288a237381b5/go.mod h1:Q4JzNkNMvjo7pXtlB5/R3oME4Nhah7fAObWgghVmtxk=
 github.com/vmware/govmomi v0.53.0-alpha.0.0.20251203154250-bac7c15eb77d h1:IbNSLmeuhDT8TgQErC2p7mQB29hGTahMbe7MAGOY6l4=
