@@ -11606,6 +11606,16 @@ spec:
                             inside the guest, ex. dvd, cdrom, sda, etc.
                           pattern: ^\w\w+$
                           type: string
+                        ipFamilyPolicy:
+                          default: IPv4Only
+                          description: |-
+                            IPFamilyPolicy specifies the IP family policy for this network interface.
+                            Valid values are: IPv4Only, IPv6Only, DualStack.
+                            When set to IPv4Only, only IPv4 addresses will be allocated.
+                            When set to IPv6Only, only IPv6 addresses will be allocated.
+                            When set to DualStack, both IPv4 and IPv6 addresses will be allocated.
+                            This field is applied via the NetOP network provider when creating NetworkInterface CRs.
+                          type: string
                         macAddr:
                           description: |-
                             MACAddr is the optional MAC address of this interface.

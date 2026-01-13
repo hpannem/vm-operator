@@ -10,6 +10,7 @@ package v1alpha5
 
 import (
 	"encoding/json"
+	"github.com/vmware-tanzu/net-operator-api/api/v1alpha1"
 	"github.com/vmware-tanzu/vm-operator/api/v1alpha5/cloudinit"
 	"github.com/vmware-tanzu/vm-operator/api/v1alpha5/common"
 	"github.com/vmware-tanzu/vm-operator/api/v1alpha5/sysprep"
@@ -2508,6 +2509,11 @@ func (in *VirtualMachineNetworkInterfaceSpec) DeepCopyInto(out *VirtualMachineNe
 		in, out := &in.SearchDomains, &out.SearchDomains
 		*out = make([]string, len(*in))
 		copy(*out, *in)
+	}
+	if in.IPFamilyPolicy != nil {
+		in, out := &in.IPFamilyPolicy, &out.IPFamilyPolicy
+		*out = new(v1alpha1.NetworkInterfaceIPFamilyPolicy)
+		**out = **in
 	}
 }
 
