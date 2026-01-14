@@ -5,7 +5,6 @@
 package network
 
 import (
-	"fmt"
 	"net"
 
 	"github.com/go-logr/logr"
@@ -98,14 +97,6 @@ func GuestOSCustomization(results NetworkInterfaceResults,
 			"macAddress", r.MacAddress,
 			"adapterIp", adapter.Ip,
 			"hasIpV6Spec", adapter.IpV6Spec != nil)
-		if adapter.Ip != nil {
-			switch v := adapter.Ip.(type) {
-			case *vimtypes.CustomizationFixedIp:
-				logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", "CustomizationFixedIp", "address", v.IpAddress)
-			default:
-				logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", fmt.Sprintf("%T", v))
-			}
-		}
 
 		mappings = append(mappings, vimtypes.CustomizationAdapterMapping{
 			MacAddress: r.MacAddress,
