@@ -253,8 +253,8 @@ var _ = Describe("GOSC", func() {
 
 				adapter := mapping.Adapter
 				Expect(mapping.MacAddress).To(Equal(macAddr1))
-				// IPv6-only fix: adapter.Ip should be set to DHCP even though no IPv4 needed
-				Expect(adapter.Ip).To(BeAssignableToTypeOf(&vimtypes.CustomizationDhcpIpGenerator{}))
+				// IPv6-only fix: adapter.Ip should be set to disable IPv4
+				Expect(adapter.Ip).To(BeAssignableToTypeOf(&vimtypes.CustomizationDisableIpV4{}))
 				Expect(adapter.IpV6Spec).ToNot(BeNil())
 				Expect(adapter.IpV6Spec.Gateway).To(Equal([]string{"2001:db8::1"}))
 				Expect(adapter.IpV6Spec.Ip).To(HaveLen(1))

@@ -84,42 +84,36 @@ func GuestOSCustomization(results NetworkInterfaceResults,
 		}
 
 		// When only IPv6 is configured (no IPv4 addresses, no DHCP4), the vSphere API
-		// requires adapter.Ip to be set. Set it to DHCP as a fallback.
-		conditionCheck := adapter.Ip == nil && !r.NoIPAM && (adapter.IpV6Spec != nil || r.DHCP6)
-		if logger.GetSink() != nil {
-			logger.V(4).Info("IPv6-only fix condition check",
-				"adapterIndex", i,
-				"adapterIpIsNil", adapter.Ip == nil,
-				"noIPAM", r.NoIPAM,
-				"hasIpV6Spec", adapter.IpV6Spec != nil,
-				"dhcp6", r.DHCP6,
-				"conditionMet", conditionCheck)
-		}
+		// requires adapter.Ip to be set. Set it to disable IPv4.
+		conditionCheck := adapter.Ip == nil && adapter.IpV6Spec != nil
+		logger.V(4).Info("IPv6-only fix condition check",
+			"adapterIndex", i,
+			"adapterIpIsNil", adapter.Ip == nil,
+			"hasIpV6Spec", adapter.IpV6Spec != nil,
+			"conditionMet", conditionCheck)
 
 		if conditionCheck {
-			adapter.Ip = &vimtypes.CustomizationDhcpIpGenerator{}
-			if logger.GetSink() != nil {
-				logger.Info("Applied IPv6-only fix: set adapter.Ip to DHCP generator",
-					"adapterIndex", i,
-					"macAddress", r.MacAddress)
-			}
+			adapter.Ip = &vimtypes.CustomizationDisableIpV4{}
+			logger.Info("Applied IPv6-only fix: set adapter.Ip to disable IPv4",
+				"adapterIndex", i,
+				"macAddress", r.MacAddress)
 		}
 
-		if logger.GetSink() != nil {
-			logger.V(4).Info("Final adapter state",
-				"adapterIndex", i,
-				"macAddress", r.MacAddress,
-				"adapterIp", adapter.Ip,
-				"hasIpV6Spec", adapter.IpV6Spec != nil)
-			if adapter.Ip != nil {
-				switch v := adapter.Ip.(type) {
-				case *vimtypes.CustomizationDhcpIpGenerator:
-					logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", "CustomizationDhcpIpGenerator")
-				case *vimtypes.CustomizationFixedIp:
-					logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", "CustomizationFixedIp", "address", v.IpAddress)
-				default:
-					logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", fmt.Sprintf("%T", v))
-				}
+		logger.V(4).Info("Final adapter state",
+			"adapterIndex", i,
+			"macAddress", r.MacAddress,
+			"adapterIp", adapter.Ip,
+			"hasIpV6Spec", adapter.IpV6Spec != nil)
+		if adapter.Ip != nil {
+			switch v := adapter.Ip.(type) {
+			case *vimtypes.CustomizationDhcpIpGenerator:
+				logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", "CustomizationDhcpIpGenerator")
+			case *vimtypes.CustomizationDisableIpV4:
+				logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", "CustomizationDisableIpV4")
+			case *vimtypes.CustomizationFixedIp:
+				logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", "CustomizationFixedIp", "address", v.IpAddress)
+			default:
+				logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", fmt.Sprintf("%T", v))
 			}
 		}
 
