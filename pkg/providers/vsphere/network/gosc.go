@@ -86,12 +86,6 @@ func GuestOSCustomization(results NetworkInterfaceResults,
 		// When only IPv6 is configured (no IPv4 addresses, no DHCP4), the vSphere API
 		// requires adapter.Ip to be set. Set it to disable IPv4.
 		conditionCheck := adapter.Ip == nil && adapter.IpV6Spec != nil
-		logger.V(4).Info("IPv6-only fix condition check",
-			"adapterIndex", i,
-			"adapterIpIsNil", adapter.Ip == nil,
-			"hasIpV6Spec", adapter.IpV6Spec != nil,
-			"conditionMet", conditionCheck)
-
 		if conditionCheck {
 			adapter.Ip = &vimtypes.CustomizationDisableIpV4{}
 			logger.Info("Applied IPv6-only fix: set adapter.Ip to disable IPv4",
@@ -106,10 +100,6 @@ func GuestOSCustomization(results NetworkInterfaceResults,
 			"hasIpV6Spec", adapter.IpV6Spec != nil)
 		if adapter.Ip != nil {
 			switch v := adapter.Ip.(type) {
-			case *vimtypes.CustomizationDhcpIpGenerator:
-				logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", "CustomizationDhcpIpGenerator")
-			case *vimtypes.CustomizationDisableIpV4:
-				logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", "CustomizationDisableIpV4")
 			case *vimtypes.CustomizationFixedIp:
 				logger.V(5).Info("Adapter IP type", "adapterIndex", i, "type", "CustomizationFixedIp", "address", v.IpAddress)
 			default:
