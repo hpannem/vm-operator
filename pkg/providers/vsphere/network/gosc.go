@@ -83,18 +83,19 @@ func GuestOSCustomization(results NetworkInterfaceResults,
 		}
 
 		// When adapter.Ip is nil, the vSphere API requires it to be set.
-		// Set it to disable IPv4, which handles both IPv6-only and completely unconfigured cases.
+		// Set it to DHCP generator, which handles both IPv6-only and completely unconfigured cases.
+		// If there's no IPv4 network available, DHCP won't assign an address anyway.
 		if adapter.Ip == nil {
-			adapter.Ip = &vimtypes.CustomizationDisableIpV4{}
+			adapter.Ip = &vimtypes.CustomizationDhcpIpGenerator{}
 			if adapter.IpV6Spec != nil {
-				// IPv6-only: disable IPv4
-				logger.Info("IPv6-only: set adapter.Ip to disable IPv4",
+				// IPv6-only: set adapter.Ip to DHCP generator
+				logger.Info("IPv6-only: set adapter.Ip to DHCP generator",
 					"adapterIndex", i,
 					"macAddress", r.MacAddress)
 			} else {
-				// Completely unconfigured: disable IPv4 to satisfy vSphere API requirement
+				// Completely unconfigured: set adapter.Ip to DHCP generator to satisfy vSphere API requirement
 				// This matches Linux behavior where an interface can exist without an IP address
-				logger.Info("Unconfigured interface: set adapter.Ip to disable IPv4",
+				logger.Info("Unconfigured interface: set adapter.Ip to DHCP generator",
 					"adapterIndex", i,
 					"macAddress", r.MacAddress)
 			}
