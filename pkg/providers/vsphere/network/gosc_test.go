@@ -210,9 +210,9 @@ var _ = Describe("GOSC", func() {
 
 				adapter := mapping.Adapter
 				Expect(mapping.MacAddress).To(Equal(macAddr1))
-				// Unconfigured interface fix: adapter.Ip should be set to DHCP generator
+				// Unconfigured interface fix: adapter.Ip should be set to disable IPv4
 				// This matches Linux behavior where an interface can exist without an IP address
-				Expect(adapter.Ip).To(BeAssignableToTypeOf(&vimtypes.CustomizationDhcpIpGenerator{}))
+				Expect(adapter.Ip).To(BeAssignableToTypeOf(&vimtypes.CustomizationDisableIpV4{}))
 				Expect(adapter.IpV6Spec).To(BeNil())
 				Expect(adapter.Gateway).To(BeEmpty())
 				Expect(adapter.SubnetMask).To(BeEmpty())
@@ -286,8 +286,8 @@ var _ = Describe("GOSC", func() {
 
 				adapter := mapping.Adapter
 				Expect(mapping.MacAddress).To(Equal(macAddr1))
-				// IPv6-only fix: adapter.Ip should be set to DHCP generator
-				Expect(adapter.Ip).To(BeAssignableToTypeOf(&vimtypes.CustomizationDhcpIpGenerator{}))
+				// IPv6-only fix: adapter.Ip should be set to disable IPv4
+				Expect(adapter.Ip).To(BeAssignableToTypeOf(&vimtypes.CustomizationDisableIpV4{}))
 				Expect(adapter.IpV6Spec).ToNot(BeNil())
 				Expect(adapter.IpV6Spec.Gateway).To(Equal([]string{"2001:db8::1"}))
 				Expect(adapter.IpV6Spec.Ip).To(HaveLen(1))
