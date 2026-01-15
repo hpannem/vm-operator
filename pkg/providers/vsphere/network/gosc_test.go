@@ -187,6 +187,39 @@ var _ = Describe("GOSC", func() {
 			})
 		})
 
+		Context("Unconfigured interface", func() {
+			BeforeEach(func() {
+				results.Results = []network.NetworkInterfaceResult{
+					{
+						MacAddress:  macAddr1,
+						Name:        "eth0",
+						IPConfigs:   []network.NetworkInterfaceIPConfig{},
+						DHCP4:       false,
+						DHCP6:       false,
+						NoIPAM:      false,
+						MTU:         1500,
+						Nameservers: []string{dnsServer1},
+					},
+				}
+			})
+
+			It("returns success with unconfigured interface fix applied", func() {
+				Expect(err).ToNot(HaveOccurred())
+				Expect(adapterMappings).To(HaveLen(1))
+				mapping := adapterMappings[0]
+
+				adapter := mapping.Adapter
+				Expect(mapping.MacAddress).To(Equal(macAddr1))
+				// Unconfigured interface fix: adapter.Ip should be set to disable IPv4
+				// This matches Linux behavior where an interface can exist without an IP address
+				Expect(adapter.Ip).To(BeAssignableToTypeOf(&vimtypes.CustomizationDisableIpV4{}))
+				Expect(adapter.IpV6Spec).To(BeNil())
+				Expect(adapter.Gateway).To(BeEmpty())
+				Expect(adapter.SubnetMask).To(BeEmpty())
+				Expect(adapter.DnsServerList).To(Equal([]string{dnsServer1}))
+			})
+		})
+
 		Context("TC-001: IPv4-Only Static", func() {
 			BeforeEach(func() {
 				results.Results = []network.NetworkInterfaceResult{
