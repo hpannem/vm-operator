@@ -7,6 +7,8 @@ package v1alpha5
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	netopv1alpha1 "github.com/vmware-tanzu/vm-operator/external/netop/api/v1alpha1"
+
 	vmopv1common "github.com/vmware-tanzu/vm-operator/api/v1alpha5/common"
 )
 
@@ -179,6 +181,15 @@ type VirtualMachineNetworkInterfaceSpec struct {
 	// or true, if search domains is not provided, the global search domains
 	// will be used instead.
 	SearchDomains []string `json:"searchDomains,omitempty"`
+
+	// IPFamilyPolicy specifies the IP family policy for this network interface.
+	// Valid values are: IPv4Only, IPv6Only, DualStack.
+	// When set to IPv4Only, only IPv4 addresses will be allocated.
+	// When set to IPv6Only, only IPv6 addresses will be allocated.
+	// When set to DualStack, both IPv4 and IPv6 addresses will be allocated.
+	// This field is applied via the NetOP network provider when creating NetworkInterface CRs.
+	// If not specified, the field will be nil and no IPFamilyPolicy will be set on the NetworkInterface CR.
+	IPFamilyPolicy *netopv1alpha1.NetworkInterfaceIPFamilyPolicy `json:"ipFamilyPolicy,omitempty"`
 }
 
 // VirtualMachineNetworkSpec defines a VM's desired network configuration.

@@ -1,18 +1,10 @@
-module github.com/vmware-tanzu/vm-operator/api
+module github.com/vmware-tanzu/vm-operator/external/netop
 
-//
-// DO NOT UPGRADE
-//
-// This is kept as low as possible to be compatible for consumers. Please speak
-// with akutz before touching this or any dependencies in this file. Thanks!
-//
 go 1.23.0
 
 require (
-	github.com/vmware-tanzu/vm-operator/external/netop v0.0.0-00010101000000-000000000000
 	k8s.io/api v0.31.0
 	k8s.io/apimachinery v0.31.0
-	sigs.k8s.io/controller-runtime v0.19.0
 )
 
 require (
@@ -33,5 +25,3 @@ require (
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 )
-
-replace github.com/vmware-tanzu/vm-operator/external/netop => ../external/netop

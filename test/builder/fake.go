@@ -14,7 +14,7 @@ import (
 
 	imgregv1a1 "github.com/vmware-tanzu/image-registry-operator-api/api/v1alpha1"
 	imgregv1 "github.com/vmware-tanzu/image-registry-operator-api/api/v1alpha2"
-	netopv1alpha1 "github.com/vmware-tanzu/net-operator-api/api/v1alpha1"
+	netopv1alpha1 "github.com/vmware-tanzu/vm-operator/external/netop/api/v1alpha1"
 	vpcv1alpha1 "github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
 
 	appv1a1 "github.com/vmware-tanzu/vm-operator/external/appplatform/api/v1alpha1"
