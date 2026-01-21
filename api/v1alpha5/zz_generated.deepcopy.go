@@ -14,6 +14,7 @@ import (
 	"github.com/vmware-tanzu/vm-operator/api/v1alpha5/cloudinit"
 	"github.com/vmware-tanzu/vm-operator/api/v1alpha5/common"
 	"github.com/vmware-tanzu/vm-operator/api/v1alpha5/sysprep"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -3115,6 +3116,16 @@ func (in *VirtualMachineServiceSpec) DeepCopyInto(out *VirtualMachineServiceSpec
 		in, out := &in.LoadBalancerSourceRanges, &out.LoadBalancerSourceRanges
 		*out = make([]string, len(*in))
 		copy(*out, *in)
+	}
+	if in.IPFamilies != nil {
+		in, out := &in.IPFamilies, &out.IPFamilies
+		*out = make([]corev1.IPFamily, len(*in))
+		copy(*out, *in)
+	}
+	if in.IPFamilyPolicy != nil {
+		in, out := &in.IPFamilyPolicy, &out.IPFamilyPolicy
+		*out = new(corev1.IPFamilyPolicy)
+		**out = **in
 	}
 }
 
