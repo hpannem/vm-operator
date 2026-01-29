@@ -9,6 +9,7 @@ module github.com/vmware-tanzu/vm-operator/api
 go 1.23.0
 
 require (
+	github.com/vmware-tanzu/net-operator-api v0.0.0-20250826165015-90a4bb21727b
 	k8s.io/api v0.31.0
 	k8s.io/apimachinery v0.31.0
 	sigs.k8s.io/controller-runtime v0.19.0
@@ -32,3 +33,5 @@ require (
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 )
+
+replace github.com/vmware-tanzu/net-operator-api => github-vcf.devops.broadcom.net/vcf/ny036812-mirrors_vmware-tanzu_net-operator-api v0.0.0-20260113071009-7c9c123bc0bf
