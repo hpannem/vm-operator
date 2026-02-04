@@ -3,6 +3,7 @@ module github.com/vmware-tanzu/vm-operator
 go 1.24.12
 
 replace (
+	github.com/vmware-tanzu/net-operator-api => github-vcf.devops.broadcom.net/vcf/ny036812-mirrors_vmware-tanzu_net-operator-api v0.0.0-20260113071009-7c9c123bc0bf
 	github.com/vmware-tanzu/vm-operator/api => ./api
 	github.com/vmware-tanzu/vm-operator/external/appplatform => ./external/appplatform
 	github.com/vmware-tanzu/vm-operator/external/byok => ./external/byok

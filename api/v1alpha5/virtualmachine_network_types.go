@@ -182,6 +182,8 @@ type VirtualMachineNetworkInterfaceSpec struct {
 	// will be used instead.
 	SearchDomains []string `json:"searchDomains,omitempty"`
 
+	// +optional
+
 	// IPFamilyPolicy specifies the IP family policy for this network interface.
 	// Valid values are: IPv4Only, IPv6Only, DualStack.
 	// When set to IPv4Only, only IPv4 addresses will be allocated.
