@@ -29,6 +29,10 @@ spec:
       containers:
       - command:
         - /manager
+        args:
+        - "--webhook-bind-address=::"
+        - "--health-addr=[::]:9445"
+        - "--profiler-address=[::]:8073"
         image: controller:latest
         imagePullPolicy: Never
         name: manager
