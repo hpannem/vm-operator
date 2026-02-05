@@ -319,8 +319,8 @@ func getAvailablePort() int {
 	// Try IPv6 first for dual-stack testing
 	listener, err := net.Listen("tcp", "[::]:0")
 	if err != nil {
-		// Fallback to IPv4 if IPv6 not available
-		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		// Fallback to localhost if IPv6 not available
+		listener, err = net.Listen("tcp", "localhost:0")
 		Expect(err).NotTo(HaveOccurred())
 	}
 	defer func() {

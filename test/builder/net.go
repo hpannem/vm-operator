@@ -24,7 +24,7 @@ func isTCPPortAvailable(port int) bool {
 	if port < minTCPPort || port > maxTCPPort {
 		return false
 	}
-	conn, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	conn, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
 		return false
 	}
