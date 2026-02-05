@@ -1,11 +1,10 @@
-# Adds dual-stack (IPv4/IPv6) bind addresses for webhook, health, and profiler endpoints
 - op: add
   path: /spec/template/spec/containers/0/args/-
-  value: --webhook-bind-address=::
+  value: "--webhook-bind-address=::"
 - op: add
   path: /spec/template/spec/containers/0/args/-
-  value: --health-addr=[::]:9445
+  value: "--health-addr=[::]:9445"
 - op: add
   path: /spec/template/spec/containers/0/args/-
-  value: --profiler-address=[::]:8073
+  value: "--profiler-address=[::]:8073"
 
