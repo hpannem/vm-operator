@@ -29,8 +29,8 @@ import (
 )
 
 const (
-	url           = "https://127.0.0.1:%d/getrequestedcapacityforvirtualmachine"
-	vmSnapshotURL = "https://127.0.0.1:%d/getrequestedcapacityforvirtualmachinesnapshot"
+	url           = "https://localhost:%d/getrequestedcapacityforvirtualmachine"
+	vmSnapshotURL = "https://localhost:%d/getrequestedcapacityforvirtualmachinesnapshot"
 	contentType   = "application/json"
 )
 
