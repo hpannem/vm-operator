@@ -10,13 +10,12 @@ package v1alpha5
 
 import (
 	"encoding/json"
-
 	"github.com/vmware-tanzu/vm-operator/api/v1alpha5/cloudinit"
 	"github.com/vmware-tanzu/vm-operator/api/v1alpha5/common"
 	"github.com/vmware-tanzu/vm-operator/api/v1alpha5/sysprep"
 	"github.com/vmware-tanzu/vm-operator/external/netop/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
