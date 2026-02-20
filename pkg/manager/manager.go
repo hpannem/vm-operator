@@ -26,7 +26,7 @@ import (
 	imgregv1 "github.com/vmware-tanzu/image-registry-operator-api/api/v1alpha2"
 	vpcv1alpha1 "github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
 
-	netopv1alpha1 "github.com/vmware-tanzu/net-operator-api/api/v1alpha1"
+	netopv1alpha1 "github.com/vmware-tanzu/vm-operator/external/netop/api/v1alpha1"
 	appv1a1 "github.com/vmware-tanzu/vm-operator/external/appplatform/api/v1alpha1"
 	byokv1 "github.com/vmware-tanzu/vm-operator/external/byok/api/v1alpha1"
 	capv1 "github.com/vmware-tanzu/vm-operator/external/capabilities/api/v1alpha1"
@@ -129,6 +129,7 @@ func New(ctx context.Context, opts Options) (Manager, error) {
 		WebhookServer: webhook.NewServer(webhook.Options{
 			CertDir: opts.WebhookSecretVolumeMountPath,
 			Port:    opts.WebhookServiceContainerPort,
+			Host:    opts.WebhookBindAddress,
 		}),
 		HealthProbeBindAddress:  opts.HealthProbeBindAddress,
 		PprofBindAddress:        opts.PprofBindAddress,

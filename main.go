@@ -291,6 +291,12 @@ func initFlags() {
 		false,
 		"Enable webhook client verification on the webhook server.",
 	)
+	flag.StringVar(
+		&managerOpts.WebhookBindAddress,
+		"webhook-bind-address",
+		"",
+		"The IP address the webhook server binds to. Use :: for dual-stack (IPv4 and IPv6) support.",
+	)
 	flag.BoolVar(
 		&managerOpts.UsePriorityQueue,
 		"use-priority-queue",

@@ -27,7 +27,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	netopv1alpha1 "github.com/vmware-tanzu/net-operator-api/api/v1alpha1"
+	netopv1alpha1 "github.com/vmware-tanzu/vm-operator/external/netop/api/v1alpha1"
 	vpcv1alpha1 "github.com/vmware-tanzu/nsx-operator/pkg/apis/vpc/v1alpha1"
 
 	ncpv1alpha1 "github.com/vmware-tanzu/vm-operator/external/ncp/api/v1alpha1"
@@ -423,6 +423,10 @@ func createNetOPNetworkInterface(
 		}
 		// NetOP only defines a VMXNet3 type, but it doesn't really matter for our purposes.
 		netIf.Spec.Type = netopv1alpha1.NetworkInterfaceTypeVMXNet3
+		// Set IPFamilyPolicy if specified in the interface spec.
+		if interfaceSpec.IPFamilyPolicy != nil {
+			netIf.Spec.IPFamilyPolicy = *interfaceSpec.IPFamilyPolicy
+		}
 		return nil
 	})
 

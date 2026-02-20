@@ -65,7 +65,7 @@ var _ = Describe("Client", Label(testlabels.VCSim), func() {
 			model.Service.RegisterEndpoints = true
 
 			// Get a free port on localhost and use that for the server.
-			addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
+			addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 			Expect(err).ToNot(HaveOccurred())
 			l, err := net.ListenTCP("tcp", addr)
 			Expect(err).ToNot(HaveOccurred())
