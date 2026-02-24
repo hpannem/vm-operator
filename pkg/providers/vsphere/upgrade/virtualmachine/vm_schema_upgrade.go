@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"time"
 
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -163,6 +165,26 @@ func ReconcileSchemaUpgrade(
 			reconcileDevices(ctx, vm, moVM, k8sClient)
 
 			vmFeatureVersion.Set(f)
+		}
+	}
+
+	// RACE-SIMULATION: sleep before writing the feature version annotation to
+	// widen the race window between volumebatch_controller reading Spec.Volumes
+	// (with nil ControllerBusNumber) and ReconcileSchemaUpgrade marking the VM
+	// as upgraded. Set VMOP_RACE_SIMULATION_DELAY (e.g. "10s") to activate.
+	if delayStr := os.Getenv("VMOP_RACE_SIMULATION_DELAY"); delayStr != "" {
+		if d, err := time.ParseDuration(delayStr); err == nil {
+			logger.Info(
+				"[RACE-SIMULATION] sleeping before writing feature version annotation — "+
+					"volumebatch_controller may fire during this window with nil ControllerBusNumber",
+				"vm", vm.Name,
+				"delay", d,
+			)
+			time.Sleep(d)
+			logger.Info(
+				"[RACE-SIMULATION] sleep done, writing feature version annotation now",
+				"vm", vm.Name,
+			)
 		}
 	}
 
