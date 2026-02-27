@@ -120,6 +120,30 @@ func ReconcileSchemaUpgrade(
 		return ErrUpgradeSchema
 	}
 
+	// RACE-SIMULATION: sleep at the start of pass 2 (featureVersion upgrade).
+	// By this point pass 1 has already completed and its deferred patch has
+	// written buildVersion, schemaVersion, and Status.InstanceUUID to the API
+	// server. The volumebatch_controller is now unblocked (InstanceUUID is set)
+	// and will fire on the next watch event. Sleeping here ensures volumebatch
+	// fires and reads Spec.Volumes before this pass sets ControllerBusNumber,
+	// reliably reproducing the race. Set VMOP_RACE_SIMULATION_DELAY (e.g.
+	// "10s") to activate.
+	if delayStr := os.Getenv("VMOP_RACE_SIMULATION_DELAY"); delayStr != "" {
+		if d, err := time.ParseDuration(delayStr); err == nil {
+			logger.Info(
+				"[RACE-SIMULATION] sleeping at start of featureVersion upgrade pass — "+
+					"volumebatch_controller may fire during this window with nil ControllerBusNumber",
+				"vm", vm.Name,
+				"delay", d,
+			)
+			time.Sleep(d)
+			logger.Info(
+				"[RACE-SIMULATION] sleep done, proceeding with featureVersion upgrade",
+				"vm", vm.Name,
+			)
+		}
+	}
+
 	if f := vmopv1util.FeatureVersionBase; !vmFeatureVersion.Has(f) {
 		reconcileBIOSUUID(ctx, vm, moVM)
 		reconcileInstanceUUID(ctx, vm, moVM)
@@ -165,26 +189,6 @@ func ReconcileSchemaUpgrade(
 			reconcileDevices(ctx, vm, moVM, k8sClient)
 
 			vmFeatureVersion.Set(f)
-		}
-	}
-
-	// RACE-SIMULATION: sleep before writing the feature version annotation to
-	// widen the race window between volumebatch_controller reading Spec.Volumes
-	// (with nil ControllerBusNumber) and ReconcileSchemaUpgrade marking the VM
-	// as upgraded. Set VMOP_RACE_SIMULATION_DELAY (e.g. "10s") to activate.
-	if delayStr := os.Getenv("VMOP_RACE_SIMULATION_DELAY"); delayStr != "" {
-		if d, err := time.ParseDuration(delayStr); err == nil {
-			logger.Info(
-				"[RACE-SIMULATION] sleeping before writing feature version annotation — "+
-					"volumebatch_controller may fire during this window with nil ControllerBusNumber",
-				"vm", vm.Name,
-				"delay", d,
-			)
-			time.Sleep(d)
-			logger.Info(
-				"[RACE-SIMULATION] sleep done, writing feature version annotation now",
-				"vm", vm.Name,
-			)
 		}
 	}
 
