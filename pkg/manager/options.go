@@ -124,6 +124,10 @@ type Options struct {
 	// Defaults to the eponymous constant in this package.
 	WebhookSecretVolumeMountPath string
 
+	// WebhookBindAddress is the IP address the webhook server binds to.
+	// Use "::" for dual-stack (IPv4 and IPv6) support.
+	WebhookBindAddress string
+
 	// EnableWebhookClientVerification determines whether to use client certificate
 	// verification for authentication to webhook requests.
 	//
@@ -214,6 +218,10 @@ func (o *Options) defaults() {
 
 	if o.WebhookSecretVolumeMountPath == "" {
 		o.WebhookSecretVolumeMountPath = DefaultWebhookSecretVolumeMountPath
+	}
+
+	if o.WebhookBindAddress == "" {
+		o.WebhookBindAddress = DefaultWebhookBindAddress
 	}
 
 	if o.InitializeProviders == nil {

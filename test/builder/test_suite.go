@@ -427,7 +427,7 @@ func (s *TestSuite) initializeManager() {
 	if s.isWebhookTest() {
 		By("configuring webhook server", func() {
 			svr := s.manager.GetWebhookServer().(*webhook.DefaultServer)
-			svr.Options.Host = "127.0.0.1"
+			svr.Options.Host = "localhost"
 			svr.Options.Port = randomTCPPort()
 			svr.Options.CertDir = s.certDir
 		})

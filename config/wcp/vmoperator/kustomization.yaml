@@ -72,3 +72,10 @@ patches:
     kind: Deployment
     name: controller-manager
     namespace: system
+- path: manager_dual_stack_patch.yaml
+  target:
+    group: apps
+    version: v1
+    kind: Deployment
+    name: controller-manager
+    namespace: system
