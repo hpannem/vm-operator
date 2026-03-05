@@ -1,5 +1,5 @@
-github.com/akutz/govmomi v0.28.1-0.20260227172523-4f9e8a8968d8 h1:5J4Pknf8yVInzI6znjuXNNvk/QWvD6+sN6Ggmg5VRPA=
-github.com/akutz/govmomi v0.28.1-0.20260227172523-4f9e8a8968d8/go.mod h1:r9BC40EeOyi6vSuYnoSKZxCZ4S4wM0dQPFRqBLCMOoE=
+github.com/akutz/govmomi v0.28.1-0.20260305222702-2e797cee74a1 h1:28ZK2WTjTneKHDBGdbzK3Ub9nJnKEOninHbIq0eiMt8=
+github.com/akutz/govmomi v0.28.1-0.20260305222702-2e797cee74a1/go.mod h1:0F3hChqXDrSQQnjfSiCqRE5lPD4aZlbOtKG4uroq2a4=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=

@@ -38,7 +38,6 @@ import io
 import json
 import os
 import re
-import socket
 import ssl
 import sys
 import tarfile
@@ -48,7 +47,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 import paramiko
@@ -73,9 +72,21 @@ OVF_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ovf_c
 
 
 # Timeouts
-VMI_WAIT_TIMEOUT = 300  # 5 minutes
-VM_TOOLS_WAIT_TIMEOUT = 600  # 10 minutes
+VMI_WAIT_TIMEOUT = 60  # 1 minutes
+VM_TOOLS_WAIT_TIMEOUT = 300  # 5 minutes
 POLL_INTERVAL = 10  # seconds
+
+class UntrustedSourceError(RuntimeError):
+    """Raised when vCenter cannot trust the source server's TLS certificate."""
+
+
+class SetupError(RuntimeError):
+    """
+    Raised when the test harness fails before the VM is deployed —
+    e.g. content library upload error, VMI never appeared, kubectl failure.
+    These are infrastructure/script problems, not OVF compatibility issues.
+    """
+
 
 # OVF XML namespaces
 OVF_NS = "http://schemas.dmtf.org/ovf/envelope/1"
@@ -106,6 +117,7 @@ class OvfInfo:
     name: str
     networks: list[OvfNetwork] = field(default_factory=list)
     properties: list[OvfProperty] = field(default_factory=list)
+    is_vapp: bool = False
 
     def has_properties(self) -> bool:
         return len(self.properties) > 0
@@ -126,11 +138,14 @@ def parse_ovf(ovf_content: str) -> OvfInfo:
     """
     root = ET.fromstring(ovf_content)
 
+    # A vApp envelope has VirtualSystemCollection as the top-level content element.
+    is_vapp = root.find(f"{{{OVF_NS}}}VirtualSystemCollection") is not None
+
     # Get VM name
     name_el = root.find(f".//{{{OVF_NS}}}VirtualSystem/{{{OVF_NS}}}Name")
     name = name_el.text if name_el is not None else "unknown"
 
-    info = OvfInfo(name=name)
+    info = OvfInfo(name=name, is_vapp=is_vapp)
 
     # Parse NetworkSection
     for net in root.findall(f".//{{{OVF_NS}}}NetworkSection/{{{OVF_NS}}}Network"):
@@ -296,6 +311,24 @@ class VCenterClient:
         if self.si:
             Disconnect(self.si)
             print("Disconnected from vCenter")
+
+    def is_vm_powered_on(self, vm_name: str) -> bool:
+        """
+        Check whether a VM is powered on via the vSphere API.
+        Searches all VMs in the inventory by name.
+        Returns True if found and in poweredOn state.
+        """
+        content = self.si.RetrieveContent()
+        container = content.viewManager.CreateContainerView(
+            content.rootFolder, [vim.VirtualMachine], True
+        )
+        try:
+            for vm in container.view:
+                if vm.name == vm_name:
+                    return vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn
+        finally:
+            container.Destroy()
+        return False
 
     def get_supervisor_credentials(self) -> tuple[str, str]:
         """
@@ -491,23 +524,124 @@ class VCenterClient:
             # Download OVF/OVA and upload files
             self._upload_ovf_files(session_id, source)
 
+            # For PULL transfers, vCenter downloads files asynchronously.
+            # Wait until every file in the session reaches READY before completing.
+            self._wait_for_session_files_ready(session_id)
+
             # Complete the session
             complete_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=complete"
             response = self.rest_session.post(complete_url)
             if not response.ok:
+                body = response.text
+                if "certificate" in body.lower() and (
+                    "expired" in body.lower() or "not trusted" in body.lower()
+                    or "certificate_unknown" in body.lower()
+                ):
+                    raise UntrustedSourceError(
+                        f"Source server TLS certificate not trusted by vCenter: {body}"
+                    )
                 raise RuntimeError(
                     f"Failed to complete update session: "
-                    f"{response.status_code} {response.reason}\n{response.text}"
+                    f"{response.status_code} {response.reason}\n{body}"
                 )
             print("  Upload completed successfully")
 
-        except Exception as e:
-            # Cancel session on failure
+        except UntrustedSourceError:
+            # Cancel the session and clean up — source cert is expired/untrusted,
+            # vCenter won't accept the content regardless of what transferred.
             cancel_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=cancel"
             self.rest_session.post(cancel_url)
+            try:
+                self.delete_library_item(item_id)
+            except Exception:
+                pass
+            raise
+
+        except Exception as e:
+            # Cancel the session and clean up the incomplete library item
+            cancel_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=cancel"
+            self.rest_session.post(cancel_url)
+            try:
+                self.delete_library_item(item_id)
+            except Exception:
+                pass
             raise e
 
         return item_id
+
+    def _wait_for_session_files_ready(self, session_id: str,
+                                      timeout: int = 3600, poll_interval: int = 10) -> int:
+        """
+        Poll the update session file list until every file is READY.
+        Returns the total bytes of all transferred files.
+        Raises RuntimeError if any file ends up in ERROR state or the timeout expires.
+        This is required for PULL transfers where vCenter downloads files asynchronously.
+        """
+        files_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}/file"
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            response = self.rest_session.get(files_url)
+            response.raise_for_status()
+            files = response.json()
+
+            statuses = {f["name"]: f.get("status", "UNKNOWN") for f in files}
+            not_ready = {name: st for name, st in statuses.items() if st != "READY"}
+
+            if not not_ready:
+                total_bytes = sum(f.get("size", 0) for f in files)
+                print(f"  All {len(files)} file(s) ready ({total_bytes} bytes)")
+                return total_bytes
+
+            # If every non-ready file is in ERROR, fail fast with all errors at once.
+            errors = {name: st for name, st in not_ready.items() if st == "ERROR"}
+            if errors and errors.keys() == not_ready.keys():
+                # Fetch per-file error details if available
+                details = {}
+                for f in files:
+                    if f.get("status") == "ERROR":
+                        details[f["name"]] = f.get("error_message") or f.get("status")
+                details_str = str(details)
+                if "certificate" in details_str.lower() and (
+                    "expired" in details_str.lower() or "not trusted" in details_str.lower()
+                    or "certificate_unknown" in details_str.lower()
+                ):
+                    raise UntrustedSourceError(
+                        f"Source server TLS certificate not trusted by vCenter: {details_str}"
+                    )
+                raise RuntimeError(
+                    f"File transfer failed for: {list(errors.keys())}. "
+                    f"Details: {details}"
+                )
+
+            transferring = list(not_ready.keys())
+            print(f"  Waiting for transfer: {transferring} ...")
+            time.sleep(poll_interval)
+
+        raise RuntimeError(
+            f"Timed out after {timeout}s waiting for session {session_id} files to become READY"
+        )
+
+    @staticmethod
+    def _extract_ovf_file_refs(ovf_content: str) -> list[str]:
+        """
+        Return all unique file references from an OVF descriptor.
+        Captures any ovf:href value (vmdk, nvram, iso, etc.), excluding
+        the OVF file itself and http(s) URLs (those are external references).
+        """
+        refs = re.findall(r'ovf:href="([^"]+)"', ovf_content)
+        seen = set()
+        result = []
+        for ref in refs:
+            if ref in seen:
+                continue
+            seen.add(ref)
+            # Skip external URLs and the .ovf descriptor itself
+            if ref.startswith('http://') or ref.startswith('https://'):
+                continue
+            if ref.endswith('.ovf') or ref.endswith('.mf') or ref.endswith('.cert'):
+                continue
+            result.append(ref)
+        return result
 
     def _upload_ovf_files(self, session_id: str, source: str) -> None:
         """
@@ -528,19 +662,20 @@ class VCenterClient:
                 with open(source) as f:
                     ovf_content = f.read()
                 self._upload_file_content(session_id, filename, ovf_content.encode())
-                vmdk_refs = re.findall(r'ovf:href="([^"]+\.vmdk)"', ovf_content)
-                for vmdk_ref in vmdk_refs:
-                    vmdk_path = os.path.join(base_dir, vmdk_ref)
-                    print(f"  Uploading local VMDK {vmdk_ref} ({os.path.getsize(vmdk_path)} bytes)...")
-                    self._upload_file_from_path(session_id, vmdk_ref, vmdk_path)
+                for ref in self._extract_ovf_file_refs(ovf_content):
+                    ref_path = os.path.join(base_dir, ref)
+                    if os.path.exists(ref_path):
+                        print(f"  Uploading {ref} ({os.path.getsize(ref_path)} bytes)...")
+                        self._upload_file_from_path(session_id, ref, ref_path)
+                    else:
+                        print(f"  Warning: referenced file not found locally, skipping: {ref}")
             else:
                 raise ValueError(f"Unsupported file type: {filename}")
         else:
-            # Remote URL - use PULL with SSL cert
-            ssl_cert = self._get_ssl_certificate(source)
-
+            # Remote URL - use PULL; pass the full cert chain so vCenter can verify the server
+            ssl_chain = self._get_ssl_chain(source)
             if filename.endswith('.ova'):
-                self._upload_file_from_url(session_id, source, filename, ssl_cert)
+                self._upload_file_from_url(session_id, source, filename, ssl_chain)
             elif filename.endswith('.ovf'):
                 base_url = source.rsplit('/', 1)[0] + '/'
                 print(f"  Downloading OVF descriptor from {source}...")
@@ -548,55 +683,71 @@ class VCenterClient:
                 response.raise_for_status()
                 ovf_content = response.text
                 self._upload_file_content(session_id, filename, ovf_content.encode())
-                vmdk_refs = re.findall(r'ovf:href="([^"]+\.vmdk)"', ovf_content)
-                for vmdk_ref in vmdk_refs:
-                    vmdk_url = urljoin(base_url, vmdk_ref)
-                    print(f"  Adding VMDK for transfer: {vmdk_ref}")
-                    self._upload_file_from_url(session_id, vmdk_url, vmdk_ref, ssl_cert)
+                for ref in self._extract_ovf_file_refs(ovf_content):
+                    ref_url = urljoin(base_url, ref)
+                    print(f"  Adding file for transfer: {ref}")
+                    self._upload_file_from_url(session_id, ref_url, ref, ssl_chain)
             else:
                 raise ValueError(f"Unsupported file type: {filename}")
 
-    def _get_ssl_certificate(self, url: str) -> Optional[str]:
-        """
-        Get the SSL certificate from a remote server in PEM format.
 
-        This certificate can be passed to the Content Library API so vCenter
-        trusts the remote server when pulling files.
+    def _get_ssl_chain(self, url: str) -> Optional[str]:
         """
+        Fetch the full TLS certificate chain (leaf + intermediates) from the server
+        in PEM format, concatenated.  vCenter needs the full chain to verify the server
+        when performing PULL transfers.
+
+        Uses `openssl s_client` to retrieve the chain; falls back to the leaf-only cert
+        via the ssl module if openssl is not available.
+        """
+        import subprocess as _sp
         parsed = urlparse(url)
         hostname = parsed.hostname
         port = parsed.port or 443
 
-        print(f"  Fetching SSL certificate from {hostname}:{port}...")
+        print(f"  Fetching TLS certificate chain from {hostname}:{port}...")
         try:
-            # Connect and get the certificate
+            result = _sp.run(
+                ["openssl", "s_client", "-connect", f"{hostname}:{port}",
+                 "-showcerts", "-servername", hostname],
+                input=b"",
+                capture_output=True,
+                timeout=15,
+            )
+            output = result.stdout.decode("utf-8", errors="replace")
+            # Extract all PEM blocks from the output
+            pem_blocks = re.findall(
+                r"(-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----)",
+                output, re.DOTALL
+            )
+            if pem_blocks:
+                chain = "\n".join(pem_blocks)
+                print(f"  Got {len(pem_blocks)} certificate(s) in chain for {hostname}")
+                return chain
+        except Exception as e:
+            print(f"  Warning: openssl s_client failed ({e}), falling back to leaf cert")
+
+        # Fallback: leaf cert only via ssl module
+        try:
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
-
-            with socket.create_connection((hostname, port), timeout=10) as sock:
+            import socket as _sock
+            with _sock.create_connection((hostname, port), timeout=10) as sock:
                 with context.wrap_socket(sock, server_hostname=hostname) as ssock:
                     cert_der = ssock.getpeercert(binary_form=True)
-
-            # Convert DER to PEM format
             cert_pem = ssl.DER_cert_to_PEM_cert(cert_der)
-            print(f"  Got SSL certificate for {hostname}")
+            print(f"  Got leaf certificate for {hostname}")
             return cert_pem
-
         except Exception as e:
-            print(f"  Warning: Could not get SSL certificate: {e}")
+            print(f"  Warning: Could not fetch SSL certificate: {e}")
             return None
 
     def _upload_file_from_url(self, session_id: str, file_url: str, filename: str,
                                ssl_cert: Optional[str] = None) -> None:
         """
-        Upload a file from URL to the update session using PULL method.
-
-        Args:
-            session_id: Content Library update session ID
-            file_url: URL to download the file from
-            filename: Name for the file in the library
-            ssl_cert: PEM-encoded SSL certificate for vCenter to trust the remote server
+        Register a file for PULL transfer in the update session.
+        ssl_cert should be the full PEM chain so vCenter can verify the remote server.
         """
         add_spec = {
             "name": filename,
@@ -605,8 +756,6 @@ class VCenterClient:
                 "uri": file_url
             }
         }
-
-        # Add SSL certificate if provided
         if ssl_cert:
             add_spec["source_endpoint"]["ssl_certificate"] = ssl_cert
 
@@ -617,7 +766,7 @@ class VCenterClient:
                 f"Failed to add file {filename} for PULL: "
                 f"{response.status_code} {response.reason}\n{response.text}"
             )
-        print(f"  Added file {filename} (PULL from URL with SSL cert)")
+        print(f"  Added file {filename} (PULL from URL)")
 
     def _upload_file_content(self, session_id: str, filename: str, content: bytes) -> None:
         """Upload small file content (e.g. OVF descriptor) directly to the update session."""
@@ -809,10 +958,7 @@ class SupervisorClient:
                 "vAppConfig": {"properties": vapp_config}
             }
         elif ovf_info and ovf_info.has_properties():
-            props = [
-                {"key": p.key, "value": {"value": p.default or ""}}
-                for p in ovf_info.properties
-            ]
+            props = auto_fill_vapp_properties(ovf_info)
             spec["bootstrap"] = {
                 "vAppConfig": {"properties": props}
             }
@@ -841,14 +987,19 @@ class SupervisorClient:
 
         print(f"  VirtualMachine {vm_name} created")
 
-    def wait_for_vm_tools(self, namespace: str, vm_name: str, timeout: int = VM_TOOLS_WAIT_TIMEOUT) -> tuple[bool, dict]:
+    def wait_for_vm_powered_on(self, namespace: str, vm_name: str,
+                               vcenter: Optional[Any] = None,
+                               timeout: int = VM_TOOLS_WAIT_TIMEOUT) -> tuple[bool, dict]:
         """
-        Wait for VM tools to be running inside the VM.
+        Wait for the VM to be powered on.
 
-        Returns (tools_running, vm_status_dict) where vm_status_dict is the
-        last observed .status from the VM CR.
+        Power state is checked via the vSphere API (vcenter.is_vm_powered_on) when
+        vcenter is provided, falling back to status.powerState in the CR otherwise.
+        The CR is still polled each iteration to detect terminal error conditions early.
+
+        Returns (powered_on, vm_status_dict).
         """
-        print(f"Waiting for VM tools to run in {vm_name}...")
+        print(f"Waiting for {vm_name} to power on...")
         start_time = time.time()
         last_status: dict = {}
 
@@ -859,15 +1010,35 @@ class SupervisorClient:
             )
             if stdout:
                 try:
-                    vm = json.loads(stdout)
-                    last_status = vm.get("status", {})
-                    vm_tools = last_status.get("vmwareTools", {})
-                    tools_status = vm_tools.get("runningStatus", "")
-                    if tools_status == "guestToolsRunning":
-                        print(f"  VM tools are running")
-                        return True, last_status
+                    vm_cr = json.loads(stdout)
+                    last_status = vm_cr.get("status", {})
                     phase = last_status.get("phase", "Unknown")
-                    print(f"  Waiting... ({int(time.time() - start_time)}s) - Phase: {phase}, Tools: {tools_status or 'unknown'}")
+                    conditions = last_status.get("conditions", [])
+
+                    # Bail out immediately on any terminal error condition
+                    error_conditions = [
+                        c for c in conditions
+                        if c.get("reason") == "Error" and c.get("status") == "False"
+                    ]
+                    if error_conditions:
+                        msgs = "; ".join(
+                            f"{c.get('type')}: {c.get('message', '')}"
+                            for c in error_conditions
+                        )
+                        print(f"  Terminal error condition(s) detected: {msgs}")
+                        return False, last_status
+
+                    # Check power state via vSphere API if available, else fall back to CR
+                    if vcenter is not None:
+                        powered_on = vcenter.is_vm_powered_on(vm_name)
+                    else:
+                        powered_on = last_status.get("powerState", "") == "PoweredOn"
+
+                    if powered_on:
+                        print(f"  VM is powered on")
+                        return True, last_status
+
+                    print(f"  Waiting... ({int(time.time() - start_time)}s) - Phase: {phase}")
                 except json.JSONDecodeError:
                     pass
             time.sleep(POLL_INTERVAL)
@@ -1073,6 +1244,97 @@ def load_ovf_list(path: str) -> list[OvfEntry]:
     return entries
 
 
+def _smart_value_for_property(prop: OvfProperty) -> str:
+    """
+    Return a smart value for an OVF property using Go template expressions
+    where the semantics are clear from the key/label/description/type, or a
+    random-but-valid fallback otherwise.
+
+    Template expressions reference the VM Operator V1alpha6 bootstrap context
+    (same as vc_vappconfig.yaml).
+    """
+    import random
+    import string
+
+    key = prop.key.lower()
+    label = prop.label.lower()
+    desc = prop.description.lower()
+    combined = f"{key} {label} {desc}"
+    typ = prop.type.lower()
+
+    # Non-user-configurable with a default: keep it as-is.
+    if not prop.user_configurable and prop.default:
+        return prop.default
+
+    # --- OVF type-based rules ---
+    if typ == "boolean":
+        return prop.default if prop.default else "False"
+
+    if typ == "password":
+        # Generate a random password that satisfies common complexity rules.
+        chars = string.ascii_letters + string.digits + "!@#$"
+        return "VMware1!" + "".join(random.choices(chars, k=8))
+
+    if typ == "ip":
+        return '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
+
+    # --- Key/label/description pattern matching ---
+
+    # Subnet prefix length (numeric, e.g. "24")
+    if any(x in combined for x in ("prefix", "prefixlen", "prefix_len", "prefix-len", "cidr")):
+        return '{{ V1alpha6_SubnetPrefixLength (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
+
+    # Subnet mask (dotted-decimal, e.g. "255.255.255.0")
+    if any(x in combined for x in ("netmask", "subnet mask", "subnetmask", "net.mask", "net_mask")):
+        return '{{ V1alpha6_SubnetMask (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
+
+    # IP address (but not gateway/dns)
+    if any(x in combined for x in ("ip address", "ip_address", "ipaddress", "net.addr",
+                                    "net_addr", "nsx_ip", "mgmt_ip", "management ip",
+                                    "pnid", "hostname")) and \
+       not any(x in combined for x in ("gateway", "dns", "nameserver")):
+        return '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
+
+    # Gateway
+    if any(x in combined for x in ("gateway", "default route", "net.gateway", "net_gateway")):
+        return "{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}"
+
+    # DNS / nameservers
+    if any(x in combined for x in ("dns", "nameserver", "name server", "net.dns")):
+        return '{{ V1alpha6_FormatNameservers -1 "," }}'
+
+    # Domain / search path
+    if any(x in combined for x in ("domain", "searchpath", "search path", "search_path", "dnsdomain")):
+        return "lvn.broadcom.net"
+
+    # Password fields by key/label
+    if any(x in combined for x in ("password", "passwd", "secret", "credential")):
+        chars = string.ascii_letters + string.digits + "!@#$"
+        return "VMware1!" + "".join(random.choices(chars, k=8))
+
+    # Use the OVF default if one exists
+    if prop.default:
+        return prop.default
+
+    # Generic string fallback: random alphanumeric
+    return "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+
+
+def auto_fill_vapp_properties(ovf_info: OvfInfo) -> list[dict]:
+    """
+    Build a vAppConfig properties list from OVF property definitions,
+    filling each value with a smart template expression or random fallback.
+    Only user-configurable properties (or those with no default) are filled;
+    non-user-configurable properties with defaults keep their defaults.
+    """
+    result = []
+    for prop in ovf_info.properties:
+        value = _smart_value_for_property(prop)
+        result.append({"key": prop.key, "value": {"value": value}})
+        print(f"    auto-fill: {prop.key!r} = {value!r}")
+    return result
+
+
 def load_vapp_config(config_file: str) -> list[dict]:
     """
     Load vAppConfig properties from a YAML file.
@@ -1112,42 +1374,138 @@ def fetch_ovf_info(source: str) -> Optional[OvfInfo]:
     return fetch_ovf_from_url(source)
 
 
+_STATUS_STYLE = {
+    "SUCCESS":      ("✅", "#1a7f37", "#dafbe1"),
+    "FAILED":       ("❌", "#cf222e", "#ffebe9"),
+    "SETUP_FAILED": ("🔧", "#8250df", "#fbefff"),
+    "SKIPPED":      ("⏭",  "#57606a", "#f6f8fa"),
+}
+
+
+def _html_escape(text: str) -> str:
+    return (text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
 def write_report(results: list[DeployResult], report_path: str) -> None:
-    """Write a deployment results table to a file and print it to stdout."""
-    col_name   = max(len("OVF Name"),    max((len(r.name)    for r in results), default=0))
-    col_vm     = max(len("VM Name"),     max((len(r.vm_name) for r in results), default=0))
-    col_status = max(len("Status"),      max((len(r.status)  for r in results), default=0))
-    col_reason = max(len("Reason"),      max((len(r.reason)  for r in results), default=0))
+    """Write an HTML deployment results report and print a summary to stdout."""
+    # Ensure the output path ends in .html
+    if not report_path.endswith(".html"):
+        report_path = os.path.splitext(report_path)[0] + ".html"
 
-    sep   = f"+{'-'*(col_name+2)}+{'-'*(col_vm+2)}+{'-'*(col_status+2)}+{'-'*(col_reason+2)}+"
-    hdr   = f"| {'OVF Name':<{col_name}} | {'VM Name':<{col_vm}} | {'Status':<{col_status}} | {'Reason':<{col_reason}} |"
+    generated = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    lines = [sep, hdr, sep]
+    # --- Build table rows ---
+    rows_html = []
     for r in results:
-        lines.append(
-            f"| {r.name:<{col_name}} | {r.vm_name:<{col_vm}} | {r.status:<{col_status}} | {r.reason:<{col_reason}} |"
+        icon, fg, bg = _STATUS_STYLE.get(r.status, ("•", "#24292f", "#f6f8fa"))
+        name_cell = (
+            f'<a href="{_html_escape(r.source)}" target="_blank">'
+            f'{_html_escape(r.name)}</a>'
+            if r.source.startswith("http")
+            else _html_escape(r.name)
         )
-    lines.append(sep)
+        badge = (
+            f'<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
+            f'background:{bg};color:{fg};font-weight:600;font-size:0.85em;'
+            f'border:1px solid {fg}33;">{icon} {_html_escape(r.status)}</span>'
+        )
+        reason_escaped = _html_escape(r.reason)
+        logs_cell = ""
+        if r.vmop_logs:
+            logs_escaped = _html_escape(r.vmop_logs)
+            logs_cell = (
+                f'<details><summary style="cursor:pointer;color:#57606a;font-size:0.8em;">'
+                f'vmop logs</summary>'
+                f'<pre style="font-size:0.75em;background:#f6f8fa;padding:8px;'
+                f'border-radius:4px;overflow:auto;max-height:300px;">'
+                f'{logs_escaped}</pre></details>'
+            )
+        rows_html.append(
+            f"<tr>"
+            f'<td style="padding:8px 12px;">{name_cell}</td>'
+            f'<td style="padding:8px 12px;font-family:monospace;font-size:0.9em;">'
+            f'{_html_escape(r.vm_name)}</td>'
+            f'<td style="padding:8px 12px;text-align:center;">{badge}</td>'
+            f'<td style="padding:8px 12px;font-size:0.85em;color:#24292f;">'
+            f'{reason_escaped}{("<br>" + logs_cell) if logs_cell else ""}</td>'
+            f"</tr>"
+        )
 
-    table = "\n".join(lines)
-    print(f"\n{table}")
+    # --- Summary counts ---
+    counts = {}
+    for r in results:
+        counts[r.status] = counts.get(r.status, 0) + 1
+    summary_parts = []
+    for status, (icon, fg, bg) in _STATUS_STYLE.items():
+        n = counts.get(status, 0)
+        if n:
+            summary_parts.append(
+                f'<span style="margin-right:16px;color:{fg};font-weight:600;">'
+                f'{icon} {status}: {n}</span>'
+            )
 
-    with open(report_path, 'w') as f:
-        f.write(f"OVF Deploy Test Report\n")
-        f.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        f.write(table)
-        f.write("\n")
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OVF Deploy Report — {generated}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         margin: 32px; color: #24292f; background: #fff; }}
+  h1   {{ font-size: 1.4em; margin-bottom: 4px; }}
+  .meta {{ color: #57606a; font-size: 0.85em; margin-bottom: 20px; }}
+  .summary {{ margin-bottom: 20px; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.9em; }}
+  thead th {{ background: #f6f8fa; border-bottom: 2px solid #d0d7de;
+              padding: 8px 12px; text-align: left; font-weight: 600; }}
+  tbody tr:nth-child(even) {{ background: #f6f8fa; }}
+  tbody tr:hover {{ background: #eaf5ff; }}
+  td, th {{ border: 1px solid #d0d7de; vertical-align: top; }}
+  a {{ color: #0969da; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<h1>OVF Deploy Test Report</h1>
+<div class="meta">Generated: {generated} &nbsp;|&nbsp; Total: {len(results)}</div>
+<div class="summary">{"".join(summary_parts)}</div>
+<table>
+<thead>
+  <tr>
+    <th>OVF Name</th>
+    <th>VM Name</th>
+    <th>Status</th>
+    <th>Details</th>
+  </tr>
+</thead>
+<tbody>
+{"".join(rows_html)}
+</tbody>
+</table>
+</body>
+</html>
+"""
 
-        # Append vmop log excerpts for any non-SUCCESS entries
-        failed = [r for r in results if r.status != "SUCCESS" and r.vmop_logs]
-        if failed:
-            f.write("\n\nVMOP Log Excerpts\n")
-            f.write("=" * 60 + "\n")
-            for r in failed:
-                f.write(f"\n--- {r.vm_name} ---\n")
-                f.write(r.vmop_logs)
-                f.write("\n")
+    with open(report_path, "w") as f:
+        f.write(html)
 
+    # Print a plain-text summary to stdout
+    print(f"\n{'='*60}")
+    print(f"OVF Deploy Report — {generated}")
+    print(f"{'='*60}")
+    col = max((len(r.name) for r in results), default=10)
+    for r in results:
+        icon = _STATUS_STYLE.get(r.status, ("•",))[0]
+        print(f"  {icon} {r.name:<{col}}  {r.status:<12}  {r.reason[:80]}")
+    print(f"\n{'='*60}")
+    for status, n in sorted(counts.items()):
+        icon = _STATUS_STYLE.get(status, ("•",))[0]
+        print(f"  {icon} {status}: {n}")
     print(f"\nReport written to {report_path}")
 
 
@@ -1261,6 +1619,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 print("  Parsing OVF descriptor...")
                 ovf_info = fetch_ovf_info(entry.source)
                 if ovf_info:
+                    if ovf_info.is_vapp:
+                        print("    Type: vApp (VirtualSystemCollection) - skipping, not supported by VM Service")
+                        results.append(DeployResult(
+                            name=entry.name, source=entry.source, vm_name=vm_name,
+                            status="SKIPPED", reason="vApp (multi-VM OVF) not supported by VM Service"
+                        ))
+                        continue
                     if ovf_info.has_networks():
                         print(f"    Networks: {[n.name for n in ovf_info.networks]}")
                     if ovf_info.has_properties():
@@ -1272,17 +1637,16 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 if entry.config_file:
                     vapp_config = load_vapp_config(entry.config_file)
 
-                vcenter.upload_ovf(library_id, entry.source, item_name)
+                try:
+                    vcenter.upload_ovf(library_id, entry.source, item_name)
+                except UntrustedSourceError:
+                    raise
+                except Exception as upload_err:
+                    raise SetupError(f"Content library upload failed: {upload_err}") from upload_err
 
                 vmi_name = supervisor.wait_for_vmi(args.namespace, item_name)
                 if not vmi_name:
-                    reason = supervisor.get_vm_status_reason(args.namespace, vm_name)
-                    logs = supervisor.get_vmop_logs_for_vm(vm_name)
-                    results.append(DeployResult(
-                        name=entry.name, source=entry.source, vm_name=vm_name,
-                        status="FAILED", reason=f"VMI not found. {reason}", vmop_logs=logs
-                    ))
-                    continue
+                    raise SetupError(f"VirtualMachineImage never appeared for '{item_name}' after upload")
 
                 _, _, rc = supervisor.run_kubectl(
                     f"get vm -n {args.namespace} {vm_name}", check=False
@@ -1310,24 +1674,39 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     vapp_config=vapp_config,
                 )
 
-                tools_running, _ = supervisor.wait_for_vm_tools(args.namespace, vm_name)
+                powered_on, _ = supervisor.wait_for_vm_powered_on(args.namespace, vm_name, vcenter=vcenter)
 
-                if tools_running:
+                if powered_on:
                     results.append(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
-                        status="SUCCESS", reason="VM tools running"
+                        status="SUCCESS", reason="VM powered on"
                     ))
                 else:
                     reason = supervisor.get_vm_status_reason(args.namespace, vm_name)
                     logs = supervisor.get_vmop_logs_for_vm(vm_name)
                     results.append(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
-                        status="PARTIAL", reason=f"Tools not running within timeout. {reason}",
+                        status="FAILED",
+                        reason=f"VM did not reach Running phase within timeout. {reason}",
                         vmop_logs=logs
                     ))
 
                 if args.cleanup:
                     supervisor.delete_vm(args.namespace, vm_name)
+
+            except UntrustedSourceError as e:
+                print(f"  Skipping: source server TLS certificate is expired or not trusted by vCenter")
+                results.append(DeployResult(
+                    name=entry.name, source=entry.source, vm_name=vm_name,
+                    status="SKIPPED", reason="Source TLS certificate expired or not trusted by vCenter"
+                ))
+
+            except SetupError as e:
+                print(f"  Setup failed: {e}")
+                results.append(DeployResult(
+                    name=entry.name, source=entry.source, vm_name=vm_name,
+                    status="SETUP_FAILED", reason=str(e)
+                ))
 
             except Exception as e:
                 import traceback
@@ -1346,10 +1725,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     status="FAILED", reason=reason, vmop_logs=logs
                 ))
 
-        report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.txt")
+        report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
         write_report(results, report_path)
 
-        return 1 if any(r.status == "FAILED" for r in results) else 0
+        return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
 
     except Exception as e:
         print(f"ERROR: {e}")
