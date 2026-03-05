@@ -15,6 +15,7 @@ replace (
 	github.com/vmware-tanzu/vm-operator/external/vsphere-policy => ./external/vsphere-policy
 	github.com/vmware-tanzu/vm-operator/pkg/backup/api => ./pkg/backup/api
 	github.com/vmware-tanzu/vm-operator/pkg/constants/testlabels => ./pkg/constants/testlabels
+	github.com/vmware/govmomi => github.com/akutz/govmomi v0.28.1-0.20260227172523-4f9e8a8968d8
 )
 
 // All replaced modules should be listed below.
