@@ -406,8 +406,11 @@ class VCenterClient:
 
         return None
 
-    def find_library_item(self, library_id: str, item_name: str) -> Optional[str]:
-        """Find a library item by name in a library."""
+    def find_library_item(self, library_id: str, item_name: str) -> Optional[dict]:
+        """
+        Find a library item by name in a library.
+        Returns a dict with 'id' and 'size' keys, or None if not found.
+        """
         url = f"https://{self.host}/api/content/library/item"
         params = {"library_id": library_id}
         response = self.rest_session.get(url, params=params)
@@ -420,21 +423,38 @@ class VCenterClient:
             item_response.raise_for_status()
             item_info = item_response.json()
             if item_info.get("name") == item_name:
-                return item_id
+                return {"id": item_id, "size": item_info.get("size", 0)}
 
         return None
+
+    def delete_library_item(self, item_id: str) -> None:
+        """Delete a content library item by ID."""
+        url = f"https://{self.host}/api/content/library/item/{item_id}"
+        response = self.rest_session.delete(url)
+        if not response.ok:
+            raise RuntimeError(
+                f"Failed to delete library item {item_id}: "
+                f"{response.status_code} {response.reason}\n{response.text}"
+            )
+        print(f"  Deleted incomplete library item {item_id}")
 
     def upload_ovf(self, library_id: str, source: str, item_name: str) -> str:
         """
         Upload an OVF/OVA to the content library from a URL or local file path.
+        If an item with the same name exists but has 0 bytes (failed prior upload),
+        it is deleted and re-uploaded.
         """
         print(f"Uploading OVF '{item_name}' from {source} to content library...")
 
         # Check if item already exists
         existing_item = self.find_library_item(library_id, item_name)
         if existing_item:
-            print(f"  Item '{item_name}' already exists in library, skipping upload")
-            return existing_item
+            if existing_item["size"] > 0:
+                print(f"  Item '{item_name}' already exists in library ({existing_item['size']} bytes), skipping upload")
+                return existing_item["id"]
+            else:
+                print(f"  Item '{item_name}' exists but has 0 bytes (incomplete upload), deleting and re-uploading...")
+                self.delete_library_item(existing_item["id"])
 
         ovf_url = source
 
@@ -502,8 +522,7 @@ class VCenterClient:
         if is_local:
             if filename.endswith('.ova'):
                 print(f"  Uploading local OVA {filename} ({os.path.getsize(source)} bytes)...")
-                with open(source, 'rb') as f:
-                    self._upload_file_content(session_id, filename, f.read())
+                self._upload_file_from_path(session_id, filename, source)
             elif filename.endswith('.ovf'):
                 base_dir = os.path.dirname(source)
                 with open(source) as f:
@@ -513,8 +532,7 @@ class VCenterClient:
                 for vmdk_ref in vmdk_refs:
                     vmdk_path = os.path.join(base_dir, vmdk_ref)
                     print(f"  Uploading local VMDK {vmdk_ref} ({os.path.getsize(vmdk_path)} bytes)...")
-                    with open(vmdk_path, 'rb') as f:
-                        self._upload_file_content(session_id, vmdk_ref, f.read())
+                    self._upload_file_from_path(session_id, vmdk_ref, vmdk_path)
             else:
                 raise ValueError(f"Unsupported file type: {filename}")
         else:
@@ -602,14 +620,26 @@ class VCenterClient:
         print(f"  Added file {filename} (PULL from URL with SSL cert)")
 
     def _upload_file_content(self, session_id: str, filename: str, content: bytes) -> None:
-        """Upload file content directly to the update session."""
-        # Add file to session with PUSH source type
+        """Upload small file content (e.g. OVF descriptor) directly to the update session."""
+        self._upload_file_path_or_bytes(session_id, filename, size=len(content), data=content)
+
+    def _upload_file_from_path(self, session_id: str, filename: str, file_path: str) -> None:
+        """Stream a local file to the update session without loading it into memory."""
+        size = os.path.getsize(file_path)
+        with open(file_path, 'rb') as f:
+            self._upload_file_path_or_bytes(session_id, filename, size=size, data=f)
+
+    def _upload_file_path_or_bytes(self, session_id: str, filename: str,
+                                   size: int, data) -> None:
+        """
+        Core PUSH upload: register the file with the session then stream data to
+        the upload endpoint. data may be bytes or an open file object.
+        """
         add_spec = {
             "name": filename,
             "source_type": "PUSH",
-            "size": len(content)
+            "size": size,
         }
-
         add_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}/file"
         response = self.rest_session.post(add_url, json=add_spec)
         if not response.ok:
@@ -619,20 +649,22 @@ class VCenterClient:
             )
         file_info = response.json()
 
-        # Upload the content
         upload_uri = file_info.get("upload_endpoint", {}).get("uri")
         if upload_uri:
             upload_response = self.rest_session.put(
                 upload_uri,
-                data=content,
-                headers={"Content-Type": "application/octet-stream"}
+                data=data,
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(size),
+                }
             )
             if not upload_response.ok:
                 raise RuntimeError(
                     f"Failed to upload content for {filename}: "
                     f"{upload_response.status_code} {upload_response.reason}\n{upload_response.text}"
                 )
-        print(f"  Uploaded file {filename} ({len(content)} bytes)")
+        print(f"  Uploaded file {filename} ({size} bytes)")
 
 
 class SupervisorClient:
