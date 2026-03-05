@@ -1,0 +1,3 @@
+# name,path_or_url
+#nsx,/Users/hp024696/Downloads/nsx-unified-appliance-9.2.0.0.25249839.ovf,./nsx_vappconfig.yaml
+vc,/Users/hp024696/Downloads/VMware-vCenter-Server-Appliance-9.2.0.0.25250147_OVF10.ovf,./vc_vappconfig.yaml

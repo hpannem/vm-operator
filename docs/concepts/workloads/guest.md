@@ -585,6 +585,7 @@ The following table lists the functions VM Operator defines and passes into the 
 | V1alpha6_IP | `func(IP string) string` | Format an IP address with the default netmask CIDR. If the specified IP is invalid, the template string is not parsed. |
 | V1alpha6_IPsFromNIC | `func (index int) []string` | List all IPs, formatted with the network length, from the n'th NIC. If the specified index is out-of-bounds, the template string is not parsed. |
 | V1alpha6_SubnetMask | `func(cidr string) (string, error)` | Get a subnet mask from an IP address formatted with a network length. |
+| V1alpha6_SubnetPrefixLength | `func(cidr string) (string, error)` | Get the prefix length as a decimal string from an IP address formatted with a network length, ex. `"192.168.1.1/24"` returns `"24"`. |
 
 ## Deprecated
 

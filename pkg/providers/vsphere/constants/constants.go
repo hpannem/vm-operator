@@ -214,6 +214,8 @@ const (
 	V1alpha6IP = "V1alpha6_IP"
 	// V1alpha6SubnetMask is an alias for versioned templating function  V1alpha6_SubnetMask.
 	V1alpha6SubnetMask = "V1alpha6_SubnetMask"
+	// V1alpha6SubnetPrefixLength is an alias for versioned templating function V1alpha6_SubnetPrefixLength.
+	V1alpha6SubnetPrefixLength = "V1alpha6_SubnetPrefixLength"
 	// V1alpha6FormatNameservers is an alias for versioned templating function V1alpha6_FormatNameservers.
 	V1alpha6FormatNameservers = "V1alpha6_FormatNameservers"
 )

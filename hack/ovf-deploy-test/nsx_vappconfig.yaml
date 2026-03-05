@@ -1,0 +1,58 @@
+properties:
+  # === REQUIRED USERNAMES ===
+  - key: nsx_cli_username
+    value:
+      value: admin
+  - key: nsx_cli_audit_username
+    value:
+      value: audit
+  # === REQUIRED PASSWORDS ===
+  - key: nsx_passwd_0
+    value:
+      value: VMware1!VMware1!
+  - key: nsx_cli_passwd_0
+    value:
+      value: VMware1!VMware1!
+  - key: nsx_cli_audit_passwd_0
+    value:
+      value: VMware1!VMware1!
+  # === NSX ROLE (REQUIRED) ===
+  - key: nsx_role
+    value:
+      value: NSX Manager
+  # === NETWORK CONFIGURATION ===
+  - key: nsx_hostname
+    value:
+      value: "{{ .V1alpha6.VM.Name }}"
+  # IPAddresses are in CIDR notation (e.g. "10.x.x.x/24"); V1alpha6_FormatIP with
+  # empty mask strips the prefix to return a plain IP address.
+  - key: nsx_ip_0
+    value:
+      value: "{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) \"\" }}"
+  # V1alpha6_SubnetMask takes a CIDR string and returns dotted-decimal notation.
+  - key: nsx_netmask_0
+    value:
+      value: "{{ V1alpha6_SubnetMask (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}"
+  - key: nsx_gateway_0
+    value:
+      value: "{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}"
+  # === DNS CONFIGURATION ===
+  - key: nsx_dns1_0
+    value:
+      value: "{{ (index .V1alpha6.Net.Nameservers 0) }}"
+  - key: nsx_domain_0
+    value:
+      value: lvn.broadcom.net
+  # === SERVICES CONFIGURATION ===
+  - key: nsx_ntp_0
+    value:
+      value: time.broadcom.net
+  - key: nsx_isSSHEnabled
+    value:
+      value: 'true'
+  - key: nsx_allowSSHRootLogin
+    value:
+      value: 'true'
+  - key: nsx_swIntegrityCheck
+    value:
+      value: 'false'

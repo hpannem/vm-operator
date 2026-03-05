@@ -274,6 +274,30 @@ var _ = Describe("TemplateVMMetadata", func() {
 			Entry("formatted_nameserver2", "{{ "+constants.V1alpha5FormatNameservers+" -1 \"-\"}}", nameserver1+"-"+nameserver2),
 		)
 
+		DescribeTable("v1alpha6 constant names",
+			func(str, expected string) {
+				fn := vmlifecycle.GetTemplateRenderFunc(vmCtx, bsArgs)
+				out := fn("", str)
+				Expect(out).To(Equal(expected))
+			},
+			Entry("cidr_ip1", "{{ "+constants.V1alpha6FirstIP+" }}", ip1Cidr),
+			Entry("cidr_ip2", "{{ "+constants.V1alpha6FirstIPFromNIC+" 1 }}", ip2Cidr),
+			Entry("cidr_ip3", "{{ ("+constants.V1alpha6IP+" \"192.168.1.37\") }}", ip1Cidr),
+			Entry("cidr_ip4", "{{ ("+constants.V1alpha6FormatIP+" \"192.168.1.37\" \"/24\") }}", ip1Cidr),
+			Entry("cidr_ip5", "{{ ("+constants.V1alpha6FormatIP+" \"192.168.1.37\" \"255.255.255.0\") }}", ip1Cidr),
+			Entry("cidr_ip6", "{{ ("+constants.V1alpha6FormatIP+" \"192.168.1.37/28\" \"255.255.255.0\") }}", ip1Cidr),
+			Entry("cidr_ip7", "{{ ("+constants.V1alpha6FormatIP+" \"192.168.1.37/28\" \"/24\") }}", ip1Cidr),
+			Entry("ip1", "{{ "+constants.V1alpha6FormatIP+" "+constants.V1alpha1FirstIP+" \"\" }}", ip1),
+			Entry("ip2", "{{ "+constants.V1alpha6FormatIP+" \"192.168.1.37/28\" \"\" }}", ip1),
+			Entry("ips_1", "{{ "+constants.V1alpha6IPsFromNIC+" 0 }}", fmt.Sprint([]string{ip1Cidr})),
+			Entry("subnetmask", "{{ "+constants.V1alpha6SubnetMask+" \"192.168.1.37/26\" }}", "255.255.255.192"),
+			Entry("subnetprefixlength_24", "{{ "+constants.V1alpha6SubnetPrefixLength+" \"192.168.1.37/24\" }}", "24"),
+			Entry("subnetprefixlength_26", "{{ "+constants.V1alpha6SubnetPrefixLength+" \"10.0.0.1/26\" }}", "26"),
+			Entry("firstNicMacAddr", "{{ "+constants.V1alpha6FirstNicMacAddr+" }}", macAddr1),
+			Entry("formatted_nameserver1", "{{ "+constants.V1alpha6FormatNameservers+" 1 \"-\"}}", nameserver1),
+			Entry("formatted_nameserver2", "{{ "+constants.V1alpha6FormatNameservers+" -1 \"-\"}}", nameserver1+"-"+nameserver2),
+		)
+
 	})
 
 	Context("Invalid template names", func() {

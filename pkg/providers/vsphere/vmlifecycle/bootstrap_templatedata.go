@@ -1161,6 +1161,17 @@ func v1a6TemplateFunctions(
 		return netmask, nil
 	}
 
+	// Get the prefix length as a decimal string from a CIDR notation IP address.
+	// e.g. "192.168.1.1/24" -> "24", "10.0.0.1/26" -> "26"
+	v1alpha6SubnetPrefixLength := func(cidr string) (string, error) {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return "", err
+		}
+		ones, _ := ipNet.Mask.Size()
+		return strconv.Itoa(ones), nil
+	}
+
 	// Format an IP address with default netmask CIDR
 	v1alpha6IP := func(IP string) (string, error) {
 		if net.ParseIP(IP) == nil {
@@ -1209,13 +1220,14 @@ func v1a6TemplateFunctions(
 	}
 
 	return template.FuncMap{
-		constants.V1alpha6FirstIP:           v1alpha6FirstIP,
-		constants.V1alpha6FirstNicMacAddr:   v1alpha6FirstNicMacAddr,
-		constants.V1alpha6FirstIPFromNIC:    v1alpha6FirstIPFromNIC,
-		constants.V1alpha6IPsFromNIC:        v1alpha6IPsFromNIC,
-		constants.V1alpha6FormatNameservers: v1alpha6FormatNameservers,
-		constants.V1alpha6SubnetMask: v1alpha6SubnetMask,
-		constants.V1alpha6IP:         v1alpha6IP,
-		constants.V1alpha6FormatIP:   v1alpha6FormatIP,
+		constants.V1alpha6FirstIP:            v1alpha6FirstIP,
+		constants.V1alpha6FirstNicMacAddr:    v1alpha6FirstNicMacAddr,
+		constants.V1alpha6FirstIPFromNIC:     v1alpha6FirstIPFromNIC,
+		constants.V1alpha6IPsFromNIC:         v1alpha6IPsFromNIC,
+		constants.V1alpha6FormatNameservers:  v1alpha6FormatNameservers,
+		constants.V1alpha6SubnetMask:         v1alpha6SubnetMask,
+		constants.V1alpha6SubnetPrefixLength: v1alpha6SubnetPrefixLength,
+		constants.V1alpha6IP:                 v1alpha6IP,
+		constants.V1alpha6FormatIP:           v1alpha6FormatIP,
 	}
 }

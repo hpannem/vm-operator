@@ -1,0 +1,9 @@
+# Copyright (c) 2026 Broadcom. All Rights Reserved.
+# Broadcom Confidential. The term "Broadcom" refers to Broadcom Inc.
+# and/or its subsidiaries.
+
+# Dependencies for OVF deploy test script
+pyvmomi>=8.0.0
+requests>=2.28.0
+paramiko>=3.0.0
+pyyaml>=6.0
