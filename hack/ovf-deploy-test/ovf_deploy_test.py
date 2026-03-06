@@ -89,6 +89,7 @@ class SetupError(RuntimeError):
 
 # OVF XML namespaces
 OVF_NS = "http://schemas.dmtf.org/ovf/envelope/1"
+VMW_NS = "http://www.vmware.com/schema/ovf"
 RASD_NS = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
 
 
@@ -117,6 +118,7 @@ class OvfInfo:
     networks: list[OvfNetwork] = field(default_factory=list)
     properties: list[OvfProperty] = field(default_factory=list)
     is_vapp: bool = False
+    guest_id: str = ""  # OVF OperatingSystemSection osType, empty if not specified
 
     def has_properties(self) -> bool:
         return len(self.properties) > 0
@@ -145,6 +147,12 @@ def parse_ovf(ovf_content: str) -> OvfInfo:
     name = name_el.text if name_el is not None else "unknown"
 
     info = OvfInfo(name=name, is_vapp=is_vapp)
+
+    # Parse OperatingSystemSection for guestId
+    os_section = root.find(f".//{{{OVF_NS}}}OperatingSystemSection")
+    if os_section is not None:
+        # osType attribute holds the VMware guest OS identifier (e.g. "vmwarePhoton64Guest")
+        info.guest_id = os_section.get(f"{{{VMW_NS}}}osType", "")
 
     # Parse NetworkSection
     for net in root.findall(f".//{{{OVF_NS}}}NetworkSection/{{{OVF_NS}}}Network"):
@@ -993,6 +1001,8 @@ class SupervisorClient:
             "storageClass": storage_class,
             "powerState": "PoweredOn",
         }
+        if not (ovf_info and ovf_info.guest_id):
+            spec["guestID"] = "vmwarePhoton64Guest"
 
         # Add network interfaces from OVF network definitions
         if ovf_info and ovf_info.has_networks():
