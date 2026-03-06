@@ -2,6 +2,8 @@ module github.com/vmware-tanzu/vm-operator
 
 go 1.24.13
 
+replace github.com/vmware/govmomi => github.com/akutz/govmomi v0.28.1-0.20260306182048-76edb74e7a5b
+
 replace (
 	github.com/vmware-tanzu/vm-operator/api => ./api
 	github.com/vmware-tanzu/vm-operator/external/appplatform => ./external/appplatform
@@ -15,7 +17,6 @@ replace (
 	github.com/vmware-tanzu/vm-operator/external/vsphere-policy => ./external/vsphere-policy
 	github.com/vmware-tanzu/vm-operator/pkg/backup/api => ./pkg/backup/api
 	github.com/vmware-tanzu/vm-operator/pkg/constants/testlabels => ./pkg/constants/testlabels
-	github.com/vmware/govmomi => github.com/akutz/govmomi v0.28.1-0.20260305222702-2e797cee74a1
 )
 
 // All replaced modules should be listed below.

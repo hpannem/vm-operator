@@ -184,7 +184,7 @@ discover                         deploy
 Artifactory API                  CSV file
     │                                │
     ▼                                ▼
-ovf_cache.json ──────────────► OvfEntry list
+ovf_files.csv ──────────────► OvfEntry list
                                      │
                               for each entry:
                                      │
