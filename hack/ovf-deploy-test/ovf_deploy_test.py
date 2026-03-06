@@ -1234,7 +1234,7 @@ def discover_ovfs(base_url: str) -> list[str]:
                     f = executor.submit(browse, child_ui, child_dl, executor, futures)
                     with lock:
                         futures.append(f)
-                elif name.lower().endswith((".ovf", ".ova")):
+                elif name.lower().endswith((".ovf", ".ova")) and not name.startswith("._"):
                     with lock:
                         ovfs.append(dl_path.rstrip("/") + "/" + name)
         except Exception as e:
