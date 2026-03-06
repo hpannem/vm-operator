@@ -85,6 +85,7 @@ options:
   --content-library NAME    Content library name (default: ovftest)
   --vm-class CLASS          VM class to use (default: best-effort-xsmall)
   --storage-class CLASS     Storage class for VM disks (default: wcpglobal-storage-profile)
+  --network-type {nsx,vds}  Network type: nsx uses SubnetSet, vds uses Network (default: nsx)
   --cleanup                 Delete each VM and its content library item after deployment (errors ignored)
   --report PATH             Path to write the HTML report (default: <csv>.report.html)
 ```
@@ -173,7 +174,7 @@ for a summary table with:
 | Default namespace | `ovftest` |
 | Default content library | `ovftest` |
 | Default VM class | `best-effort-xsmall` |
-| Network mapping | All OVF networks → NSX VPC SubnetSet `""` |
+| Network mapping | NSX: SubnetSet `""`, VDS: Network `""` (set with `--network-type`) |
 | VM power-on timeout | 5 minutes |
 
 ## How It Works

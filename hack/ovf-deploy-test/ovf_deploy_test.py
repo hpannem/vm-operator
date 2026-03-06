@@ -971,7 +971,8 @@ class SupervisorClient:
     def create_vm(self, namespace: str, vm_name: str, image_name: str,
                   vm_class: str, storage_class: str,
                   ovf_info: Optional[OvfInfo] = None,
-                  vapp_config: Optional[list] = None) -> None:
+                  vapp_config: Optional[list] = None,
+                  network_type: str = "nsx") -> None:
         """
         Create a VirtualMachine CR.
 
@@ -997,14 +998,19 @@ class SupervisorClient:
         if ovf_info and ovf_info.has_networks():
             interfaces = []
             for i, net in enumerate(ovf_info.networks):
-                interfaces.append({
-                    "name": f"eth{i}",
-                    "network": {
+                if network_type == "vds":
+                    net_ref = {
+                        "apiVersion": "netoperator.vmware.com/v1alpha1",
+                        "kind": "Network",
+                        "name": ""
+                    }
+                else:  # nsx (default)
+                    net_ref = {
                         "apiVersion": "crd.nsx.vmware.com/v1alpha1",
                         "kind": "SubnetSet",
                         "name": ""
                     }
-                })
+                interfaces.append({"name": f"eth{i}", "network": net_ref})
             if interfaces:
                 spec["network"] = {"interfaces": interfaces}
 
@@ -1781,6 +1787,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     vm_class=args.vm_class,
                     storage_class=args.storage_class,
                     ovf_info=ovf_info,
+                    network_type=args.network_type,
                     vapp_config=vapp_config,
                 )
 
@@ -1916,6 +1923,12 @@ def main() -> int:
         "--storage-class",
         default=STORAGE_CLASS,
         help=f"Storage class for VM disks (default: {STORAGE_CLASS})"
+    )
+    p_deploy.add_argument(
+        "--network-type",
+        choices=["nsx", "vds"],
+        default="nsx",
+        help="Network type: 'nsx' (SubnetSet) or 'vds' (Network) (default: nsx)"
     )
     p_deploy.add_argument(
         "--cleanup",
