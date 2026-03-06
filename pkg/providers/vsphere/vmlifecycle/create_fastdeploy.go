@@ -216,19 +216,22 @@ func fastDeploy(
 		}
 	}
 
-	if a, b := len(srcDiskPaths), len(disks); a != b {
-		logger.Info("Got disks", "disks", disks)
-		return nil, fmt.Errorf(
-			"invalid disk count: len(srcDiskPaths)=%d, len(disks)=%d", a, b)
-	}
-
 	// Update the disks with their expected file names.
+	j := 0
 	for i := range disks {
 		d := disks[i]
 		if bfb, ok := d.Backing.(vimtypes.BaseVirtualDeviceFileBackingInfo); ok {
 			fb := bfb.GetVirtualDeviceFileBackingInfo()
 			fb.Datastore = &createArgs.Datastores[0].MoRef
-			fb.FileName = dstDiskPaths[i]
+
+			if fb.FileName != "" {
+				// Only set the file name if it was non-empty
+				// already, otherwise this was a disk entry
+				// from the OVF that was meant to be an empty
+				// disk.
+				fb.FileName = dstDiskPaths[j]
+				j++
+			}
 		}
 	}
 	logger.Info("Got disks", "disks", disks)
@@ -445,14 +448,6 @@ func fastDeployDirect(
 		diskFormat); err != nil {
 
 		return nil, err
-	}
-
-	for i := range diskSpecs {
-		ds := diskSpecs[i]
-
-		// Set the file operation to an empty string since the disk already
-		// exists.
-		ds.FileOperation = ""
 	}
 
 	return fastDeployCreateVM(ctx, logger, folder, pool, host, configSpec)

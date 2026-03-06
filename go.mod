@@ -2,6 +2,8 @@ module github.com/vmware-tanzu/vm-operator
 
 go 1.24.13
 
+replace github.com/vmware/govmomi => github.com/akutz/govmomi v0.28.1-0.20260306182048-76edb74e7a5b
+
 replace (
 	github.com/vmware-tanzu/vm-operator/api => ./api
 	github.com/vmware-tanzu/vm-operator/external/appplatform => ./external/appplatform
