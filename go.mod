@@ -2,7 +2,7 @@ module github.com/vmware-tanzu/vm-operator
 
 go 1.24.13
 
-replace github.com/vmware/govmomi => github.com/akutz/govmomi v0.28.1-0.20260306182048-76edb74e7a5b
+replace github.com/vmware/govmomi => github.com/akutz/govmomi v0.28.1-0.20260306230005-78a5ee487b72
 
 replace (
 	github.com/vmware-tanzu/vm-operator/api => ./api
