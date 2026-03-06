@@ -367,55 +367,76 @@ func fastDeployLinked(
 
 	logger := pkglog.FromContextOrDefault(ctx).WithName("fastDeployLinked")
 
-	// Linked clones do not fully support encryption, so remove the possible
-	// crypto information from the VM's disks.
-	for i := range diskSpecs {
-		ds := diskSpecs[i]
-		if ds.Backing != nil {
-			ds.Backing.Crypto = nil
+	if len(srcDiskPaths) > 0 {
+		// Ensure all the parent disks are added to the ExtraConfig as the
+		// special vmprov.keepDisks value to prevent the parent disk from being
+		// deleted with the VM when it is deleted and/or promoted.
+		srcDiskNames := make([]string, len(srcDiskPaths))
+		for i := range srcDiskPaths {
+			srcDiskNames[i] = path.Base(srcDiskPaths[i])
 		}
+		exConfigKeyVal := &vimtypes.OptionValue{
+			Key:   pkgconst.VMProvKeepDisksExtraConfigKey,
+			Value: strings.Join(srcDiskNames, ","),
+		}
+		configSpec.ExtraConfig = append(configSpec.ExtraConfig, exConfigKeyVal)
+		logger.Info(
+			"Preserving linked parents on delete/promote via extraConfig",
+			"extraConfigKey", exConfigKeyVal.Key,
+			"extraConfigValue", exConfigKeyVal.Value)
 	}
 
-	// Ensure all the parent disks are added to the ExtraConfig as the special
-	// vmprov.keepDisks value to prevent the parent disk from being deleted with
-	// the VM when it is deleted and/or promoted.
-	srcDiskNames := make([]string, len(srcDiskPaths))
-	for i := range srcDiskPaths {
-		srcDiskNames[i] = path.Base(srcDiskPaths[i])
-	}
-	exConfigKeyVal := &vimtypes.OptionValue{
-		Key:   pkgconst.VMProvKeepDisksExtraConfigKey,
-		Value: strings.Join(srcDiskNames, ","),
-	}
-	configSpec.ExtraConfig = append(configSpec.ExtraConfig, exConfigKeyVal)
-	logger.Info("Preserving linked parents on delete/promote via extraConfig",
-		"extraConfigKey", exConfigKeyVal.Key,
-		"extraConfigValue", exConfigKeyVal.Value)
-
+	j := 0
 	for i := range disks {
-		fileBackingInfo := vimtypes.VirtualDeviceFileBackingInfo{
-			Datastore: &datastoreRef,
-			FileName:  srcDiskPaths[i],
-		}
 		switch tBack := disks[i].Backing.(type) {
 		case *vimtypes.VirtualDiskFlatVer2BackingInfo:
-			// Point the disk to its parent.
-			tBack.Parent = &vimtypes.VirtualDiskFlatVer2BackingInfo{
-				VirtualDeviceFileBackingInfo: fileBackingInfo,
-				DiskMode:                     string(vimtypes.VirtualDiskModePersistent),
-				ThinProvisioned:              ptr.To(true),
+			if tBack.FileName != "" {
+				// Linked clones do not fully support encryption, so remove the
+				// possible crypto information from this child disk.
+				diskSpecs[i].Backing.Crypto = nil
+
+				// Point the disk to its parent.
+				tBack.Parent = &vimtypes.VirtualDiskFlatVer2BackingInfo{
+					VirtualDeviceFileBackingInfo: vimtypes.VirtualDeviceFileBackingInfo{
+						Datastore: &datastoreRef,
+						FileName:  srcDiskPaths[j],
+					},
+					DiskMode:        string(vimtypes.VirtualDiskModePersistent),
+					ThinProvisioned: ptr.To(true),
+				}
+				j++
 			}
 		case *vimtypes.VirtualDiskSeSparseBackingInfo:
-			// Point the disk to its parent.
-			tBack.Parent = &vimtypes.VirtualDiskSeSparseBackingInfo{
-				VirtualDeviceFileBackingInfo: fileBackingInfo,
-				DiskMode:                     string(vimtypes.VirtualDiskModePersistent),
+			if tBack.FileName != "" {
+				// Linked clones do not fully support encryption, so remove the
+				// possible crypto information from this child disk.
+				diskSpecs[i].Backing.Crypto = nil
+
+				// Point the disk to its parent.
+				tBack.Parent = &vimtypes.VirtualDiskSeSparseBackingInfo{
+					VirtualDeviceFileBackingInfo: vimtypes.VirtualDeviceFileBackingInfo{
+						Datastore: &datastoreRef,
+						FileName:  srcDiskPaths[j],
+					},
+					DiskMode: string(vimtypes.VirtualDiskModePersistent),
+				}
+				j++
 			}
 		case *vimtypes.VirtualDiskSparseVer2BackingInfo:
-			// Point the disk to its parent.
-			tBack.Parent = &vimtypes.VirtualDiskSparseVer2BackingInfo{
-				VirtualDeviceFileBackingInfo: fileBackingInfo,
-				DiskMode:                     string(vimtypes.VirtualDiskModePersistent),
+			if tBack.FileName != "" {
+				// Linked clones do not fully support encryption, so remove the
+				// possible crypto information from this child disk.
+				diskSpecs[i].Backing.Crypto = nil
+
+				// Point the disk to its parent.
+				tBack.Parent = &vimtypes.VirtualDiskSparseVer2BackingInfo{
+					VirtualDeviceFileBackingInfo: vimtypes.VirtualDeviceFileBackingInfo{
+						Datastore: &datastoreRef,
+						FileName:  srcDiskPaths[j],
+					},
+					DiskMode: string(vimtypes.VirtualDiskModePersistent),
+				}
+				j++
 			}
 		}
 	}
