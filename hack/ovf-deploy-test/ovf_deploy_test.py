@@ -68,7 +68,6 @@ DEFAULT_CONTENT_LIBRARY = "ovftest"
 DEFAULT_VM_CLASS = "best-effort-xsmall"
 DEFAULT_VCENTER_USER = "administrator@vsphere.local"
 STORAGE_CLASS = "wcpglobal-storage-profile"
-OVF_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ovf_cache.json")
 
 
 # Timeouts
@@ -1079,15 +1078,22 @@ class SupervisorClient:
         except json.JSONDecodeError:
             return "Could not parse VM status"
 
-    def get_vmop_logs_for_vm(self, vm_name: str, lines: int = 200) -> str:
+    def get_vmop_logs_for_vm(self, vm_name: str, since_seconds: Optional[int] = None) -> str:
         """
-        Fetch recent vmop controller-manager logs filtered to the given VM name.
+        Fetch vmop controller-manager logs filtered to the given VM name.
+
+        When since_seconds is provided, fetches logs from that many seconds ago
+        (more reliable than --tail for long runs). Falls back to --tail=500.
 
         Returns relevant log lines as a single string, empty if none found.
         """
+        if since_seconds is not None:
+            log_arg = f"--since={since_seconds}s"
+        else:
+            log_arg = "--tail=500"
         stdout, _, _ = self.run_kubectl(
             f"logs deploy/vmware-system-vmop-controller-manager "
-            f"-n vmware-system-vmop --tail={lines} 2>/dev/null | grep {vm_name} || true",
+            f"-n vmware-system-vmop {log_arg} 2>/dev/null | grep -F '{vm_name}' || true",
             check=False
         )
         return stdout.strip() if stdout else ""
@@ -1098,32 +1104,19 @@ class SupervisorClient:
         print(f"  Deleted VM {vm_name}")
 
 
-def discover_ovfs(base_url: str, refresh: bool = False) -> list[str]:
+def discover_ovfs(base_url: str) -> list[str]:
     """
     Discover OVF/OVA files from a directory listing URL.
 
     Supports JFrog Artifactory repositories by using the storage API
-    to recursively browse subdirectories. Results are cached in ovf_cache.json
-    next to the script; pass refresh=True to force a fresh discovery.
+    to recursively browse subdirectories.
 
     Args:
         base_url: Base URL to discover OVFs from
-        refresh: If True, ignore the cache and re-discover
 
     Returns:
         List of OVF/OVA URLs
     """
-    if not refresh and os.path.exists(OVF_CACHE_FILE):
-        try:
-            with open(OVF_CACHE_FILE, 'r') as f:
-                cache = json.load(f)
-            if cache.get("base_url") == base_url:
-                ovfs = cache.get("ovfs", [])
-                print(f"Using cached OVF list ({len(ovfs)} files) from {OVF_CACHE_FILE}")
-                return ovfs
-        except Exception:
-            pass  # Cache unreadable, fall through to discovery
-
     print(f"Discovering OVFs from {base_url}...")
 
     # Convert UI URL to Artifactory API URL if needed
@@ -1181,13 +1174,6 @@ def discover_ovfs(base_url: str, refresh: bool = False) -> list[str]:
             print(f"    - {ovf}")
         if len(ovfs) > 10:
             print(f"    ... and {len(ovfs) - 10} more")
-
-        try:
-            with open(OVF_CACHE_FILE, 'w') as f:
-                json.dump({"base_url": base_url, "ovfs": ovfs}, f, indent=2)
-            print(f"  Cached OVF list to {OVF_CACHE_FILE}")
-        except Exception as e:
-            print(f"  Warning: Could not write OVF cache: {e}")
 
         return ovfs
 
@@ -1358,12 +1344,49 @@ def load_vapp_config(config_file: str) -> list[dict]:
 
 
 def ovf_list_from_discovered(urls: list[str]) -> list[OvfEntry]:
-    """Convert a list of discovered OVF/OVA URLs into OvfEntry objects."""
-    entries = []
+    """
+    Convert a list of discovered OVF/OVA URLs into OvfEntry objects.
+
+    When multiple URLs share the same filename stem (e.g. nostalgia.ovf in
+    different directories), the name is disambiguated by prepending the
+    immediate parent directory: nostalgia/nostalgia, nostalgia_small/nostalgia, etc.
+    """
+    # First pass: collect raw stem → list of urls
+    from collections import defaultdict
+    stem_to_urls: dict[str, list[str]] = defaultdict(list)
     for url in urls:
         filename = os.path.basename(urlparse(url).path)
-        item_name = os.path.splitext(filename)[0]
-        entries.append(OvfEntry(name=item_name, source=url))
+        stem = os.path.splitext(filename)[0]
+        stem_to_urls[stem].append(url)
+
+    entries = []
+    for url in urls:
+        parsed = urlparse(url)
+        path_parts = parsed.path.rstrip("/").split("/")
+        filename = path_parts[-1]
+        stem = os.path.splitext(filename)[0]
+
+        if len(stem_to_urls[stem]) > 1:
+            # Walk up path segments until we find one that makes the name unique,
+            # or use up to 2 levels if all collide.
+            for depth in range(1, min(3, len(path_parts))):
+                parent = path_parts[-(depth + 1)]
+                candidate = f"{parent}/{stem}"
+                # Unique if no other URL in the same stem group produces the same candidate
+                others = [u for u in stem_to_urls[stem] if u != url]
+                if not any(
+                    urlparse(u).path.rstrip("/").split("/")[-(depth + 1)] == parent
+                    for u in others
+                ):
+                    name = candidate.replace("/", "_")
+                    break
+            else:
+                # Full path fallback: use everything after base_path separator
+                name = "_".join(path_parts[-3:-1]) + "_" + stem
+        else:
+            name = stem
+
+        entries.append(OvfEntry(name=name, source=url))
     return entries
 
 
@@ -1546,7 +1569,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
 
     Output format: name,url  (one entry per line, commented header included)
     """
-    urls = discover_ovfs(args.base_url, refresh=args.refresh_cache)
+    urls = discover_ovfs(args.base_url)
     if not urls:
         print("No OVF/OVA files found.")
         return 1
@@ -1606,6 +1629,11 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         print(f"Content libraries in namespace: {libraries}")
 
         results: list[DeployResult] = []
+        report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
+
+        def record(result: DeployResult) -> None:
+            results.append(result)
+            write_report(results, report_path)
 
         for entry in entries:
             print(f"\n{'=' * 60}")
@@ -1621,9 +1649,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 if ovf_info:
                     if ovf_info.is_vapp:
                         print("    Type: vApp (VirtualSystemCollection) - skipping, not supported by VM Service")
-                        results.append(DeployResult(
+                        record(DeployResult(
                             name=entry.name, source=entry.source, vm_name=vm_name,
-                            status="SKIPPED", reason="vApp (multi-VM OVF) not supported by VM Service"
+                            status="SKIPPED", reason="Multi-VM OVF not supported by VM Service"
                         ))
                         continue
                     if ovf_info.has_networks():
@@ -1664,12 +1692,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     else:
                         print("  Warning: VM deletion timed out, proceeding anyway")
 
+                vm_start_time = time.time()
                 supervisor.create_vm(
                     namespace=args.namespace,
                     vm_name=vm_name,
                     image_name=vmi_name,
                     vm_class=args.vm_class,
-                    storage_class=STORAGE_CLASS,
+                    storage_class=args.storage_class,
                     ovf_info=ovf_info,
                     vapp_config=vapp_config,
                 )
@@ -1677,14 +1706,15 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 powered_on, _ = supervisor.wait_for_vm_powered_on(args.namespace, vm_name, vcenter=vcenter)
 
                 if powered_on:
-                    results.append(DeployResult(
+                    record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
                         status="SUCCESS", reason="VM powered on"
                     ))
                 else:
+                    elapsed = int(time.time() - vm_start_time) + 30  # 30s buffer
                     reason = supervisor.get_vm_status_reason(args.namespace, vm_name)
-                    logs = supervisor.get_vmop_logs_for_vm(vm_name)
-                    results.append(DeployResult(
+                    logs = supervisor.get_vmop_logs_for_vm(vm_name, since_seconds=elapsed)
+                    record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
                         status="FAILED",
                         reason=f"VM did not reach Running phase within timeout. {reason}",
@@ -1696,14 +1726,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
             except UntrustedSourceError as e:
                 print(f"  Skipping: source server TLS certificate is expired or not trusted by vCenter")
-                results.append(DeployResult(
+                record(DeployResult(
                     name=entry.name, source=entry.source, vm_name=vm_name,
                     status="SKIPPED", reason="Source TLS certificate expired or not trusted by vCenter"
                 ))
 
             except SetupError as e:
                 print(f"  Setup failed: {e}")
-                results.append(DeployResult(
+                record(DeployResult(
                     name=entry.name, source=entry.source, vm_name=vm_name,
                     status="SETUP_FAILED", reason=str(e)
                 ))
@@ -1720,14 +1750,12 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 reason = f"{e}"
                 if reason_from_cr:
                     reason += f". CR: {reason_from_cr}"
-                results.append(DeployResult(
+                record(DeployResult(
                     name=entry.name, source=entry.source, vm_name=vm_name,
                     status="FAILED", reason=reason, vmop_logs=logs
                 ))
 
-        report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
-        write_report(results, report_path)
-
+        write_report(results, report_path)  # final write also prints summary to stdout
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
 
     except Exception as e:
@@ -1763,11 +1791,6 @@ def main() -> int:
         default=DEFAULT_OVF_BASE_URL,
         help=f"Artifactory base URL to discover from (default: {DEFAULT_OVF_BASE_URL})"
     )
-    p_discover.add_argument(
-        "--refresh-cache",
-        action="store_true",
-        help="Ignore cached OVF list and re-discover"
-    )
 
     # --- deploy subcommand ---
     p_deploy = sub.add_parser(
@@ -1797,6 +1820,11 @@ def main() -> int:
         "--vm-class",
         default=DEFAULT_VM_CLASS,
         help=f"VM class to use (default: {DEFAULT_VM_CLASS})"
+    )
+    p_deploy.add_argument(
+        "--storage-class",
+        default=STORAGE_CLASS,
+        help=f"Storage class for VM disks (default: {STORAGE_CLASS})"
     )
     p_deploy.add_argument(
         "--cleanup",
