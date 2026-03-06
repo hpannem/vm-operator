@@ -942,12 +942,20 @@ class SupervisorClient:
                                     msg = cond.get("message", "")
                                     if msg:
                                         last_vmi_msg = msg
-                                    # "cache not ready" is transient — vmop is still
-                                    # fetching the OVF envelope from the content library.
-                                    # Keep polling until we get a substantive error or success.
-                                    if msg and "cache not ready" not in msg:
+                                    # Only bail out on messages that indicate a permanent
+                                    # vmop failure. Transient states ("cache not ready",
+                                    # "VirtualMachineImageNotSynced" with no detail) are
+                                    # normal during initial sync — keep polling.
+                                    _TERMINAL_VMI_ERRORS = (
+                                        "failed to get hardware",
+                                        "failed to marshal",
+                                        "failed to create or patch",
+                                        "control characters are not allowed",
+                                        "yaml:",
+                                    )
+                                    if msg and any(e in msg for e in _TERMINAL_VMI_ERRORS):
                                         reason = f"VirtualMachineImage not ready: {msg}"
-                                        print(f"  VMI error: {reason}")
+                                        print(f"  VMI terminal error: {reason}")
                                         return None, reason, last_seen_vmi_name
                 except json.JSONDecodeError:
                     pass
