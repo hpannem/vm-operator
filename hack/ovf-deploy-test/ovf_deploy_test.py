@@ -71,7 +71,7 @@ STORAGE_CLASS = "wcpglobal-storage-profile"
 
 
 # Timeouts
-VMI_WAIT_TIMEOUT = 60  # 1 minutes
+VMI_WAIT_TIMEOUT = 300  # 5 minutes
 VM_TOOLS_WAIT_TIMEOUT = 300  # 5 minutes
 POLL_INTERVAL = 10  # seconds
 
@@ -747,6 +747,10 @@ class VCenterClient:
         """
         Register a file for PULL transfer in the update session.
         ssl_cert should be the full PEM chain so vCenter can verify the remote server.
+
+        Falls back to PUSH (download locally then stream to vCenter) if vCenter
+        returns a server-side error (e.g. 500 "transferSessionId is null") that
+        indicates it cannot initiate the PULL transfer.
         """
         add_spec = {
             "name": filename,
@@ -760,12 +764,34 @@ class VCenterClient:
 
         add_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}/file"
         response = self.rest_session.post(add_url, json=add_spec)
-        if not response.ok:
-            raise RuntimeError(
-                f"Failed to add file {filename} for PULL: "
-                f"{response.status_code} {response.reason}\n{response.text}"
-            )
-        print(f"  Added file {filename} (PULL from URL)")
+        if response.ok:
+            print(f"  Added file {filename} (PULL from URL)")
+            return
+
+        # On server-side errors fall back to PUSH: download the file locally then stream it
+        if response.status_code >= 500:
+            print(f"  PULL failed ({response.status_code}), falling back to PUSH for {filename}")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
+                tmp_path = tmp.name
+            try:
+                dl = requests.get(file_url, verify=False, stream=True, timeout=300)
+                dl.raise_for_status()
+                with open(tmp_path, 'wb') as f:
+                    for chunk in dl.iter_content(chunk_size=8 * 1024 * 1024):
+                        f.write(chunk)
+                self._upload_file_from_path(session_id, filename, tmp_path)
+                print(f"  Uploaded file {filename} (PUSH fallback)")
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            return
+
+        raise RuntimeError(
+            f"Failed to add file {filename} for PULL: "
+            f"{response.status_code} {response.reason}\n{response.text}"
+        )
 
     def _upload_file_content(self, session_id: str, filename: str, content: bytes) -> None:
         """Upload small file content (e.g. OVF descriptor) directly to the update session."""
@@ -879,10 +905,20 @@ class SupervisorClient:
         )
         return stdout.strip("'").split() if stdout.strip("'") else []
 
-    def wait_for_vmi(self, namespace: str, image_name: str, timeout: int = VMI_WAIT_TIMEOUT) -> Optional[str]:
-        """Wait for a VirtualMachineImage to be ready."""
+    def wait_for_vmi(self, namespace: str, image_name: str,
+                     timeout: int = VMI_WAIT_TIMEOUT) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        Wait for a VirtualMachineImage to become Ready.
+
+        Returns (vmi_name, None, None) on success.
+        Returns (None, reason, last_seen_vmi_name) on terminal failure or timeout,
+        where last_seen_vmi_name is the VMI CR name observed during polling (useful
+        for fetching relevant vmop logs even on failure).
+        """
         print(f"Waiting for VirtualMachineImage containing '{image_name}'...")
         start_time = time.time()
+        last_vmi_msg = ""
+        last_seen_vmi_name = ""
 
         while time.time() - start_time < timeout:
             stdout, _, _ = self.run_kubectl(
@@ -895,21 +931,34 @@ class SupervisorClient:
                     for item in vmi_list.get("items", []):
                         vmi_name = item.get("metadata", {}).get("name", "")
                         display_name = item.get("status", {}).get("name", "")
-                        # Match by display name or metadata name
                         if image_name.lower() in vmi_name.lower() or image_name.lower() in display_name.lower():
-                            # Check if ready
+                            last_seen_vmi_name = vmi_name
                             conditions = item.get("status", {}).get("conditions", [])
                             for cond in conditions:
-                                if cond.get("type") == "Ready" and cond.get("status") == "True":
-                                    print(f"  Found ready VMI: {vmi_name}")
-                                    return vmi_name
+                                if cond.get("type") == "Ready":
+                                    if cond.get("status") == "True":
+                                        print(f"  Found ready VMI: {vmi_name}")
+                                        return vmi_name, None, None
+                                    msg = cond.get("message", "")
+                                    if msg:
+                                        last_vmi_msg = msg
+                                    # "cache not ready" is transient — vmop is still
+                                    # fetching the OVF envelope from the content library.
+                                    # Keep polling until we get a substantive error or success.
+                                    if msg and "cache not ready" not in msg:
+                                        reason = f"VirtualMachineImage not ready: {msg}"
+                                        print(f"  VMI error: {reason}")
+                                        return None, reason, last_seen_vmi_name
                 except json.JSONDecodeError:
                     pass
 
             print(f"  Waiting... ({int(time.time() - start_time)}s)")
             time.sleep(POLL_INTERVAL)
 
-        return None
+        timeout_reason = f"VirtualMachineImage for '{image_name}' did not become ready within {timeout}s"
+        if last_vmi_msg:
+            timeout_reason += f": {last_vmi_msg}"
+        return None, timeout_reason, last_seen_vmi_name or None
 
     def create_vm(self, namespace: str, vm_name: str, image_name: str,
                   vm_class: str, storage_class: str,
@@ -1078,25 +1127,36 @@ class SupervisorClient:
         except json.JSONDecodeError:
             return "Could not parse VM status"
 
-    def get_vmop_logs_for_vm(self, vm_name: str, since_seconds: Optional[int] = None) -> str:
+    def get_vmop_logs(self, *search_terms: str, since_seconds: Optional[int] = None) -> str:
         """
-        Fetch vmop controller-manager logs filtered to the given VM name.
+        Fetch vmop controller-manager logs with lines matching ANY of the search terms.
 
         When since_seconds is provided, fetches logs from that many seconds ago
         (more reliable than --tail for long runs). Falls back to --tail=500.
 
         Returns relevant log lines as a single string, empty if none found.
         """
+        if not search_terms:
+            return ""
         if since_seconds is not None:
             log_arg = f"--since={since_seconds}s"
         else:
             log_arg = "--tail=500"
+        # Escape regex special chars in each term, join with | for alternation
+        escaped = "|".join(
+            t.replace("\\", "\\\\").replace(".", r"\.").replace("[", r"\[").replace("]", r"\]")
+            for t in search_terms
+        )
         stdout, _, _ = self.run_kubectl(
             f"logs deploy/vmware-system-vmop-controller-manager "
-            f"-n vmware-system-vmop {log_arg} 2>/dev/null | grep -F '{vm_name}' || true",
+            f"-n vmware-system-vmop {log_arg} 2>/dev/null | grep -E '{escaped}' || true",
             check=False
         )
         return stdout.strip() if stdout else ""
+
+    def get_vmop_logs_for_vm(self, vm_name: str, since_seconds: Optional[int] = None) -> str:
+        """Fetch vmop logs relevant to a VirtualMachine by name."""
+        return self.get_vmop_logs(vm_name, since_seconds=since_seconds)
 
     def delete_vm(self, namespace: str, vm_name: str) -> None:
         """Delete a VirtualMachine."""
@@ -1106,80 +1166,77 @@ class SupervisorClient:
 
 def discover_ovfs(base_url: str) -> list[str]:
     """
-    Discover OVF/OVA files from a directory listing URL.
+    Discover OVF/OVA files from an Artifactory repository URL.
 
-    Supports JFrog Artifactory repositories by using the storage API
-    to recursively browse subdirectories.
+    Uses the Artifactory UI native browser API which returns all entries
+    including remote/uncached ones that the storage API misses. Directory
+    traversal is parallelised with a thread pool for speed.
 
     Args:
-        base_url: Base URL to discover OVFs from
+        base_url: Artifactory UI or download base URL (e.g. ending in testdata/)
 
     Returns:
-        List of OVF/OVA URLs
+        Sorted list of OVF/OVA download URLs
     """
+    import concurrent.futures
+    import threading
+
     print(f"Discovering OVFs from {base_url}...")
 
-    # Convert UI URL to Artifactory API URL if needed
-    # https://packages.vcfd.broadcom.net/ui/native/cls-generic-virtual/testdata/
-    # -> https://packages.vcfd.broadcom.net/artifactory/api/storage/cls-generic-virtual/testdata/
-    api_url = base_url
-    if "/ui/native/" in base_url:
-        api_url = base_url.replace("/ui/native/", "/artifactory/api/storage/")
-    elif "/artifactory/" in base_url and "/api/storage/" not in base_url:
-        # Direct artifactory path like /artifactory/cls-generic-virtual/testdata/
-        api_url = base_url.replace("/artifactory/", "/artifactory/api/storage/")
+    # Derive host and repo/path to build the UI native browser API URL.
+    # Accepted input forms:
+    #   https://host/ui/native/repo/path/
+    #   https://host/artifactory/repo/path/
+    parsed = urlparse(base_url)
+    host = f"{parsed.scheme}://{parsed.netloc}"
+    path = parsed.path.rstrip("/")
 
-    # Also compute the download base URL
-    download_base = base_url
-    if "/ui/native/" in base_url:
-        download_base = base_url.replace("/ui/native/", "/artifactory/")
-    elif "/api/storage/" in base_url:
-        download_base = base_url.replace("/api/storage/", "/")
+    if "/ui/native/" in path:
+        repo_path = path.split("/ui/native/", 1)[1]
+    elif "/artifactory/" in path:
+        repo_path = path.split("/artifactory/", 1)[1]
+    else:
+        repo_path = path.lstrip("/")
 
-    ovfs = []
+    ui_base = f"{host}/ui/api/v1/ui/nativeBrowser/{repo_path}"
+    dl_base = f"{host}/artifactory/{repo_path}"
 
-    def browse_directory(api_path: str, download_path: str, depth: int = 0) -> None:
-        """Recursively browse directory for OVF/OVA files."""
-        if depth > 3:  # Limit recursion depth
-            return
+    ovfs: list[str] = []
+    lock = threading.Lock()
 
+    def browse(ui_path: str, dl_path: str,
+               executor: "concurrent.futures.ThreadPoolExecutor",
+               futures: list) -> None:
         try:
-            response = requests.get(api_path, verify=False, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-
+            r = requests.get(ui_path, headers={"Accept": "application/json"},
+                             verify=False, timeout=30)
+            r.raise_for_status()
+            data = r.json()
             for child in data.get("children", []):
-                child_uri = child.get("uri", "").lstrip("/")
-                is_folder = child.get("folder", False)
-
-                if is_folder:
-                    # Recurse into subdirectory
-                    child_api = api_path.rstrip("/") + "/" + child_uri
-                    child_download = download_path.rstrip("/") + "/" + child_uri
-                    browse_directory(child_api, child_download, depth + 1)
-                else:
-                    # Check if it's an OVF or OVA file
-                    if child_uri.lower().endswith(('.ovf', '.ova')):
-                        full_url = download_path.rstrip("/") + "/" + child_uri
-                        ovfs.append(full_url)
-
+                name = child.get("name", "")
+                if child.get("folder"):
+                    child_ui = ui_path.rstrip("/") + "/" + name
+                    child_dl = dl_path.rstrip("/") + "/" + name
+                    f = executor.submit(browse, child_ui, child_dl, executor, futures)
+                    with lock:
+                        futures.append(f)
+                elif name.lower().endswith((".ovf", ".ova")):
+                    with lock:
+                        ovfs.append(dl_path.rstrip("/") + "/" + name)
         except Exception as e:
-            print(f"  Warning: Could not browse {api_path}: {e}")
+            print(f"  Warning: Could not browse {ui_path}: {e}")
 
-    try:
-        browse_directory(api_url, download_base)
+    futures: list = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        futures.append(executor.submit(browse, ui_base, dl_base, executor, futures))
+        i = 0
+        while i < len(futures):
+            futures[i].result()
+            i += 1
 
-        print(f"  Found {len(ovfs)} OVF/OVA files")
-        for ovf in ovfs[:10]:  # Show first 10
-            print(f"    - {ovf}")
-        if len(ovfs) > 10:
-            print(f"    ... and {len(ovfs) - 10} more")
-
-        return ovfs
-
-    except Exception as e:
-        print(f"  Warning: Could not discover OVFs: {e}")
-        return []
+    ovfs.sort()
+    print(f"  Found {len(ovfs)} OVF/OVA files")
+    return ovfs
 
 
 @dataclass
@@ -1248,13 +1305,14 @@ def _smart_value_for_property(prop: OvfProperty) -> str:
     combined = f"{key} {label} {desc}"
     typ = prop.type.lower()
 
+    # --- OVF type-based rules ---
+    if typ == "boolean":
+        default = prop.default.capitalize() if prop.default else ""
+        return default if default in ("True", "False") else "False"
+
     # Non-user-configurable with a default: keep it as-is.
     if not prop.user_configurable and prop.default:
         return prop.default
-
-    # --- OVF type-based rules ---
-    if typ == "boolean":
-        return prop.default if prop.default else "False"
 
     if typ == "password":
         # Generate a random password that satisfies common complexity rules.
@@ -1266,8 +1324,14 @@ def _smart_value_for_property(prop: OvfProperty) -> str:
 
     # --- Key/label/description pattern matching ---
 
-    # Subnet prefix length (numeric, e.g. "24")
-    if any(x in combined for x in ("prefix", "prefixlen", "prefix_len", "prefix-len", "cidr")):
+    # IPv6-specific fields: leave empty — we don't configure IPv6 addresses
+    if any(x in combined for x in ("ipv6", "ip6", "inet6")):
+        return ""
+
+    # Subnet prefix length (numeric, e.g. "24") — must not also match "netmask"
+    if any(x in combined for x in ("prefixlen", "prefix_len", "prefix-len")) or \
+       (any(x in combined for x in ("prefix", "cidr")) and
+            not any(x in combined for x in ("netmask", "subnet mask", "subnetmask"))):
         return '{{ V1alpha6_SubnetPrefixLength (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
 
     # Subnet mask (dotted-decimal, e.g. "255.255.255.0")
@@ -1672,9 +1736,18 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 except Exception as upload_err:
                     raise SetupError(f"Content library upload failed: {upload_err}") from upload_err
 
-                vmi_name = supervisor.wait_for_vmi(args.namespace, item_name)
+                vmi_name, vmi_error, failed_vmi_name = supervisor.wait_for_vmi(args.namespace, item_name)
                 if not vmi_name:
-                    raise SetupError(f"VirtualMachineImage never appeared for '{item_name}' after upload")
+                    # Search logs by VMI CR name (e.g. vmi-abc123) if we saw it, plus item name
+                    search_terms = [t for t in [failed_vmi_name, item_name] if t]
+                    logs = supervisor.get_vmop_logs(*search_terms)
+                    record(DeployResult(
+                        name=entry.name, source=entry.source, vm_name=vm_name,
+                        status="FAILED",
+                        reason=vmi_error or f"VirtualMachineImage for '{item_name}' never appeared",
+                        vmop_logs=logs
+                    ))
+                    continue
 
                 _, _, rc = supervisor.run_kubectl(
                     f"get vm -n {args.namespace} {vm_name}", check=False
@@ -1722,7 +1795,17 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     ))
 
                 if args.cleanup:
-                    supervisor.delete_vm(args.namespace, vm_name)
+                    try:
+                        supervisor.delete_vm(args.namespace, vm_name)
+                    except Exception as e:
+                        print(f"  Warning: cleanup VM failed: {e}")
+                    try:
+                        cl_item = vcenter.find_library_item(library_id, item_name)
+                        if cl_item:
+                            vcenter.delete_library_item(cl_item["id"])
+                            print(f"  Deleted content library item '{item_name}'")
+                    except Exception as e:
+                        print(f"  Warning: cleanup CL item failed: {e}")
 
             except UntrustedSourceError as e:
                 print(f"  Skipping: source server TLS certificate is expired or not trusted by vCenter")
@@ -1829,7 +1912,7 @@ def main() -> int:
     p_deploy.add_argument(
         "--cleanup",
         action="store_true",
-        help="Delete each VM after it is verified"
+        help="Delete each VM and its content library item after deployment (errors ignored)"
     )
     p_deploy.add_argument(
         "--report",

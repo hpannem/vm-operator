@@ -85,7 +85,7 @@ options:
   --content-library NAME    Content library name (default: ovftest)
   --vm-class CLASS          VM class to use (default: best-effort-xsmall)
   --storage-class CLASS     Storage class for VM disks (default: wcpglobal-storage-profile)
-  --cleanup                 Delete each VM after it is verified
+  --cleanup                 Delete each VM and its content library item after deployment (errors ignored)
   --report PATH             Path to write the HTML report (default: <csv>.report.html)
 ```
 

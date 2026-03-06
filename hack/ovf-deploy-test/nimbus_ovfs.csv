@@ -1,3 +1,10 @@
 # name,path_or_url
-#nsx,/Users/hp024696/Downloads/nsx-unified-appliance-9.2.0.0.25249839.ovf,./nsx_vappconfig.yaml
-vc,/Users/hp024696/Downloads/VMware-vCenter-Server-Appliance-9.2.0.0.25250147_OVF10.ovf,./vc_vappconfig.yaml
+vc,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25262036/publish/VMware-vCenter-Server-Appliance-9.1.0.0.25262036_OVF10.ovf,./vc_vappconfig.yaml
+nsx,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25262056/publish/nsx-unified-appliance/exports/ovf/nsx-unified-appliance-9.1.0.0.25262063.ovf,./nsx_vappconfig.yaml
+esxi,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25262174/publish/ovf/esxvmovf-25262174.ovf
+vropsproxy,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25262086/publish/ovf/Operations-Cloud-Proxy-9.1.0.0.25262086.ovf
+vrops,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25262067/publish/Operations-Appliance-9.1.0.0.25262067.ovf,./vrops_vappconfig.yaml
+011-va,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25262048/publish/exports/ovf/O11N_VA-9.1.0.0.25262048.ovf
+license-svr,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25262073/publish/exports/ovf/Vcf-License-Server-9.1.0.0.25262073.ovf
+vrni-platform,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25262177/publish/VCF-Operations-for-networks-9.1.0.0.25262177-platform.ova
+vrni-collector,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25262177/publish/VCF-Operations-for-networks-9.1.0.0.25262177-collector.ova

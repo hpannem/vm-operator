@@ -1,0 +1,54 @@
+properties:
+- key: vmw.vsphereui.solutioninstall.requiredVcVersion
+  value:
+    value: "9.1"
+- key: root_password
+  value:
+    value: VMware1!OsRLzVR8
+- key: timezone
+  value:
+    value: Etc/UTC
+- key: guestinfo.cis.appliance.ssh.enabled
+  value:
+    value: "False"
+- key: domain
+  value:
+    value: lvn.broadcom.net
+- key: searchpath
+  value:
+    value: lvn.broadcom.net
+- key: DNS
+  value:
+    value: '{{ V1alpha6_FormatNameservers -1 "," }}'
+- key: ipv4_type
+  value:
+    value: static
+- key: ipv4_address
+  value:
+    value: '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses
+      0) "" }}'
+- key: ipv4_gateway
+  value:
+    value: '{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}'
+- key: ipv4_netmask
+  value:
+    value: '{{ V1alpha6_SubnetMask (index (index .V1alpha6.Net.Devices 0).IPAddresses
+      0) }}'
+- key: forceIpv6
+  value:
+    value: "False"
+- key: ipv6_type
+  value:
+    value: "Disabled"
+- key: ipv6_address
+  value:
+    value: ""
+- key: ipv6_gateway
+  value:
+    value: ""
+- key: ipv6_netmask
+  value:
+    value: ""
+- key: vmname
+  value:
+    value: VMware_Aria_Operations
