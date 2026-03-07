@@ -258,7 +258,7 @@ class VCenterClient:
         self.rest_session = None
         self.ssh = None
 
-    def connect(self) -> None:
+    def connect(self, ssh: bool = True) -> None:
         """Connect to vCenter."""
         print(f"Connecting to vCenter {self.host}...")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -276,25 +276,18 @@ class VCenterClient:
         # Create REST session for Content Library operations
         self._create_rest_session()
 
-        # Create SSH connection for Supervisor credential retrieval
-        self._create_ssh_session()
+        if ssh:
+            self._create_ssh_session()
 
     def _create_rest_session(self) -> None:
-        """Create REST API session for Content Library operations."""
+        """Create REST API session for Content Library and vSphere API operations."""
         self.rest_session = requests.Session()
         self.rest_session.verify = False
-
-        # Authenticate
         auth_url = f"https://{self.host}/api/session"
-        response = self.rest_session.post(
-            auth_url,
-            auth=(self.user, self.password)
-        )
+        response = self.rest_session.post(auth_url, auth=(self.user, self.password))
         response.raise_for_status()
         session_id = response.json()
-        self.rest_session.headers.update({
-            "vmware-api-session-id": session_id
-        })
+        self.rest_session.headers.update({"vmware-api-session-id": session_id})
         print("  Connected to vCenter REST API")
 
     def _create_ssh_session(self) -> None:
@@ -344,73 +337,80 @@ class VCenterClient:
         """
         Return a deploy target dict with resource_pool_id, folder_id, and datastore_id.
 
-        If datacenter/cluster/datastore names are not provided, auto-picks the first
-        available ones from the vCenter inventory via REST API.
+        Uses pyVmomi to traverse the inventory tree so it works across all
+        vCenter versions (REST filter params vary by version).
         """
-        # List datacenters
-        dc_url = f"https://{self.host}/api/vcenter/datacenter"
-        dcs = self.rest_session.get(dc_url).json()
-        if not dcs:
+        content = self.si.RetrieveContent()
+
+        # Find datacenter
+        all_dcs = content.viewManager.CreateContainerView(
+            content.rootFolder, [vim.Datacenter], True
+        )
+        try:
+            dc_list = list(all_dcs.view)
+        finally:
+            all_dcs.Destroy()
+
+        if not dc_list:
             raise RuntimeError("No datacenters found in vCenter")
         if datacenter:
-            dc = next((d for d in dcs if d.get("name") == datacenter), None)
-            if not dc:
+            dc_obj = next((d for d in dc_list if d.name == datacenter), None)
+            if not dc_obj:
                 raise RuntimeError(f"Datacenter '{datacenter}' not found")
         else:
-            dc = dcs[0]
-        dc_id = dc["datacenter"]
-        print(f"  Using datacenter: {dc['name']} ({dc_id})")
+            dc_obj = dc_list[0]
+        print(f"  Using datacenter: {dc_obj.name}")
 
-        # List clusters in datacenter
-        cl_url = f"https://{self.host}/api/vcenter/cluster"
-        cl_params = {"filter.datacenters": dc_id}
-        clusters = self.rest_session.get(cl_url, params=cl_params).json()
-        if not clusters:
-            raise RuntimeError(f"No clusters found in datacenter '{dc['name']}'")
+        # Find cluster within the datacenter's host folder
+        def _find_clusters(folder):
+            found = []
+            for child in folder.childEntity:
+                if isinstance(child, vim.ClusterComputeResource):
+                    found.append(child)
+                elif isinstance(child, vim.Folder):
+                    found.extend(_find_clusters(child))
+            return found
+
+        clusters_in_dc = _find_clusters(dc_obj.hostFolder)
+        if not clusters_in_dc:
+            raise RuntimeError(f"No clusters found in datacenter '{dc_obj.name}'")
         if cluster:
-            cl = next((c for c in clusters if c.get("name") == cluster), None)
-            if not cl:
+            cl_obj = next((c for c in clusters_in_dc if c.name == cluster), None)
+            if not cl_obj:
                 raise RuntimeError(f"Cluster '{cluster}' not found")
         else:
-            cl = clusters[0]
-        cl_id = cl["cluster"]
-        print(f"  Using cluster: {cl['name']} ({cl_id})")
+            cl_obj = clusters_in_dc[0]
+        print(f"  Using cluster: {cl_obj.name}")
 
-        # Get the cluster's root resource pool
-        cl_detail = self.rest_session.get(
-            f"https://{self.host}/api/vcenter/cluster/{cl_id}"
-        ).json()
-        rp_id = cl_detail.get("resource_pool")
-        if not rp_id:
-            raise RuntimeError(f"Could not find resource pool for cluster '{cl['name']}'")
+        # Root resource pool of the cluster
+        rp_obj = cl_obj.resourcePool
+        if not rp_obj:
+            raise RuntimeError(f"No resource pool found for cluster '{cl_obj.name}'")
+        rp_id = rp_obj._moId
         print(f"  Using resource pool: {rp_id}")
 
-        # Get the datacenter's default VM folder
-        dc_detail = self.rest_session.get(
-            f"https://{self.host}/api/vcenter/datacenter/{dc_id}"
-        ).json()
-        folder_id = dc_detail.get("vm_folder")
-        if not folder_id:
-            raise RuntimeError(f"Could not find VM folder for datacenter '{dc['name']}'")
+        # VM folder of the datacenter
+        folder_id = dc_obj.vmFolder._moId
         print(f"  Using VM folder: {folder_id}")
 
-        # List datastores accessible from the cluster
-        ds_url = f"https://{self.host}/api/vcenter/datastore"
-        ds_params = {"filter.datacenters": dc_id}
-        datastores = self.rest_session.get(ds_url, params=ds_params).json()
-        if not datastores:
-            raise RuntimeError(f"No datastores found in datacenter '{dc['name']}'")
+        # Find a suitable datastore accessible from the cluster
+        ds_candidates = list(cl_obj.datastore)
+        if not ds_candidates:
+            raise RuntimeError(f"No datastores found for cluster '{cl_obj.name}'")
         if datastore:
-            ds = next((d for d in datastores if d.get("name") == datastore), None)
-            if not ds:
+            ds_obj = next((d for d in ds_candidates if d.name == datastore), None)
+            if not ds_obj:
                 raise RuntimeError(f"Datastore '{datastore}' not found")
         else:
-            # Prefer a writable, non-local datastore
-            writable = [d for d in datastores
-                        if d.get("accessible") and d.get("type") not in ("VSAN",)]
-            ds = writable[0] if writable else datastores[0]
-        ds_id = ds["datastore"]
-        print(f"  Using datastore: {ds['name']} ({ds_id})")
+            # Prefer accessible, non-vSAN datastores
+            writable = [
+                d for d in ds_candidates
+                if d.summary.accessible
+                and d.summary.type not in ("vsan", "VSAN", "vVol")
+            ]
+            ds_obj = writable[0] if writable else ds_candidates[0]
+        ds_id = ds_obj._moId
+        print(f"  Using datastore: {ds_obj.name} ({ds_id})")
 
         return {
             "resource_pool_id": rp_id,
@@ -423,35 +423,31 @@ class VCenterClient:
                              datastore_id: str) -> str:
         """
         Deploy a content library item as a VM using the vSphere REST API.
-        Returns the VM ID of the deployed VM.
+        Returns the VM MoRef ID of the deployed VM.
         """
         url = f"https://{self.host}/api/vcenter/ovf/library-item/{item_id}?action=deploy"
-        spec = {
+        body = {
+            "target": {
+                "resource_pool_id": resource_pool_id,
+                "folder_id": folder_id,
+            },
             "deployment_spec": {
                 "name": vm_name,
                 "accept_all_EULA": True,
                 "storage_provisioning": "thin",
                 "default_datastore_id": datastore_id,
             },
-            "target": {
-                "resource_pool_id": resource_pool_id,
-                "folder_id": folder_id,
-            }
         }
-        response = self.rest_session.post(url, json=spec)
+        response = self.rest_session.post(url, json=body)
         if not response.ok:
             raise RuntimeError(
                 f"Failed to deploy library item: "
-                f"{response.status_code} {response.reason}\n{response.text}"
+                f"{response.status_code} {response.reason} {response.text}"
             )
         result = response.json()
-        # Response contains succeeded flag and resource_id with vm id
-        if not result.get("succeeded"):
-            errors = result.get("errors", [])
-            raise RuntimeError(f"OVF deploy failed: {errors}")
         vm_id = result.get("resource_id", {}).get("id")
         if not vm_id:
-            raise RuntimeError(f"Deploy succeeded but no VM ID returned: {result}")
+            raise RuntimeError(f"Deploy returned no VM ID: {result}")
         print(f"  Deployed VM '{vm_name}' with ID: {vm_id}")
         return vm_id
 
@@ -1983,13 +1979,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                         supervisor.delete_vm(args.namespace, vm_name)
                     except Exception as e:
                         print(f"  Warning: cleanup VM failed: {e}")
-                    try:
-                        cl_item = vcenter.find_library_item(library_id, item_name)
-                        if cl_item:
-                            vcenter.delete_library_item(cl_item["id"])
-                            print(f"  Deleted content library item '{item_name}'")
-                    except Exception as e:
-                        print(f"  Warning: cleanup CL item failed: {e}")
+                    if not args.no_cleanup_cl:
+                        try:
+                            cl_item = vcenter.find_library_item(library_id, item_name)
+                            if cl_item:
+                                vcenter.delete_library_item(cl_item["id"])
+                                print(f"  Deleted content library item '{item_name}'")
+                        except Exception as e:
+                            print(f"  Warning: cleanup CL item failed: {e}")
 
             except UntrustedSourceError as e:
                 print(f"  Skipping: source server TLS certificate is expired or not trusted by vCenter")
@@ -2049,7 +2046,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"ERROR: No valid entries found in {args.csv}")
         return 1
 
-    report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
+    report_path = args.report or (os.path.splitext(args.csv)[0] + "-validate.report.html")
     results: list[DeployResult] = []
 
     def record(result: DeployResult) -> None:
@@ -2064,7 +2061,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             args.vcenter_password,
             args.vcenter_root_password,
         )
-        vcenter.connect()
+        vcenter.connect(ssh=False)
 
         library_id = vcenter.find_content_library(args.content_library)
         if not library_id:
@@ -2084,15 +2081,6 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
             vm_id: Optional[str] = None
             try:
-                ovf_info = fetch_ovf_info(entry.source)
-                if ovf_info and ovf_info.is_vapp:
-                    print("    Type: vApp — skipping, not supported")
-                    record(DeployResult(
-                        name=entry.name, source=entry.source, vm_name=vm_name,
-                        status="SKIPPED", reason="Multi-VM OVF not supported by VM Service"
-                    ))
-                    continue
-
                 try:
                     vcenter.upload_ovf(library_id, entry.source, item_name)
                 except UntrustedSourceError:
@@ -2148,16 +2136,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
                     status="FAILED", reason=str(e)
                 ))
             finally:
-                # Always clean up — this is a validation run
+                # Always clean up the VM — keep the CL item for reuse
                 if vm_id:
                     vcenter.delete_vm_by_id(vm_id)
-                try:
-                    cl_item = vcenter.find_library_item(library_id, item_name)
-                    if cl_item:
-                        vcenter.delete_library_item(cl_item["id"])
-                        print(f"  Deleted content library item '{item_name}'")
-                except Exception as e:
-                    print(f"  Warning: could not delete CL item '{item_name}': {e}")
 
         write_report(results, report_path)
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
@@ -2237,7 +2218,12 @@ def main() -> int:
     p_deploy.add_argument(
         "--cleanup",
         action="store_true",
-        help="Delete each VM and its content library item after deployment (errors ignored)"
+        help="Delete each VM after deployment (errors ignored)"
+    )
+    p_deploy.add_argument(
+        "--no-cleanup-cl",
+        action="store_true",
+        help="When --cleanup is set, skip deleting the content library item"
     )
     p_deploy.add_argument(
         "--report",
