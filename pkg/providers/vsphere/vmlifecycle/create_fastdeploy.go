@@ -393,7 +393,7 @@ func fastDeployLinked(
 			if tBack.FileName != "" {
 				// Linked clones do not fully support encryption, so remove the
 				// possible crypto information from this child disk.
-				diskSpecs[i].Backing.Crypto = nil
+				diskSpecs[j].Backing.Crypto = nil
 
 				// Point the disk to its parent.
 				tBack.Parent = &vimtypes.VirtualDiskFlatVer2BackingInfo{
@@ -410,7 +410,7 @@ func fastDeployLinked(
 			if tBack.FileName != "" {
 				// Linked clones do not fully support encryption, so remove the
 				// possible crypto information from this child disk.
-				diskSpecs[i].Backing.Crypto = nil
+				diskSpecs[j].Backing.Crypto = nil
 
 				// Point the disk to its parent.
 				tBack.Parent = &vimtypes.VirtualDiskSeSparseBackingInfo{
@@ -426,7 +426,7 @@ func fastDeployLinked(
 			if tBack.FileName != "" {
 				// Linked clones do not fully support encryption, so remove the
 				// possible crypto information from this child disk.
-				diskSpecs[i].Backing.Crypto = nil
+				diskSpecs[j].Backing.Crypto = nil
 
 				// Point the disk to its parent.
 				tBack.Parent = &vimtypes.VirtualDiskSparseVer2BackingInfo{
