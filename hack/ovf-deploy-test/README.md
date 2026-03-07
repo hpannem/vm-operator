@@ -20,7 +20,7 @@ pip install -r requirements.txt
 
 ## Commands
 
-The tool has two subcommands: `discover` and `deploy`.
+The tool has three subcommands: `discover`, `deploy`, and `validate`.
 
 ### `discover` — Find OVFs from Artifactory
 
@@ -87,6 +87,46 @@ options:
   --storage-class CLASS     Storage class for VM disks (default: wcpglobal-storage-profile)
   --network-type {nsx,vds}  Network type: nsx uses SubnetSet, vds uses Network (default: nsx)
   --cleanup                 Delete each VM and its content library item after deployment (errors ignored)
+  --report PATH             Path to write the HTML report (default: <csv>.report.html)
+```
+
+### `validate` — Validate OVFs directly via vSphere API
+
+Uploads each OVF to a content library and deploys it as a VM directly via the
+vSphere REST API (`POST /api/vcenter/ovf/library-item/{id}?action=deploy`),
+bypassing VM Service entirely. Useful for checking whether an OVF is well-formed
+and deployable without a Supervisor cluster. The VM and content library item are
+**always deleted** after each test, regardless of outcome.
+
+```bash
+python ovf_deploy_test.py validate ovfs.csv \
+    --vcenter <vcenter-ip> \
+    --vcenter-password <password>
+```
+
+```
+usage: ovf_deploy_test.py validate [-h] --vcenter HOST --vcenter-password PASS
+                                    [--vcenter-user USER]
+                                    [--vcenter-root-password PASS]
+                                    [--content-library NAME]
+                                    [--datacenter NAME] [--cluster NAME]
+                                    [--datastore NAME]
+                                    [--report PATH]
+                                    csv
+
+positional arguments:
+  csv                       CSV file with OVFs to validate
+
+options:
+  --vcenter HOST            vCenter hostname or IP (required)
+  --vcenter-password PASS   vCenter API password (required)
+  --vcenter-user USER       vCenter username (default: administrator@vsphere.local)
+  --vcenter-root-password PASS
+                            vCenter root SSH password (default: same as --vcenter-password)
+  --content-library NAME    Content library name for staging (default: ovftest)
+  --datacenter NAME         Datacenter to deploy into (default: first available)
+  --cluster NAME            Cluster to deploy into (default: first available)
+  --datastore NAME          Datastore to deploy into (default: first writable)
   --report PATH             Path to write the HTML report (default: <csv>.report.html)
 ```
 
@@ -180,26 +220,27 @@ for a summary table with:
 ## How It Works
 
 ```
-discover                         deploy
-────────                         ──────
-Artifactory API                  CSV file
-    │                                │
-    ▼                                ▼
-ovf_files.csv ──────────────► OvfEntry list
-                                     │
-                              for each entry:
-                                     │
-                              ┌──────▼──────────────────────┐
-                              │ 1. Download OVF descriptor   │
-                              │    (detect vApp, parse props)│
-                              │ 2. Upload to Content Library │
-                              │    (PUSH local / PULL remote)│
-                              │ 3. Wait for VMI in namespace │
-                              │ 4. Create VirtualMachine CR  │
-                              │ 5. Poll for PoweredOn state  │
-                              │ 6. Record result + update    │
-                              │    HTML report               │
-                              └─────────────────────────────┘
+discover                         deploy                          validate
+────────                         ──────                          ────────
+Artifactory API                  CSV file                        CSV file
+    │                                │                               │
+    ▼                                ▼                               ▼
+ovf_files.csv ──────────────► OvfEntry list                  OvfEntry list
+                                     │                               │
+                              for each entry:                 for each entry:
+                                     │                               │
+                              ┌──────▼──────────────────────┐ ┌─────▼──────────────────────────┐
+                              │ 1. Download OVF descriptor   │ │ 1. Download OVF descriptor      │
+                              │    (detect vApp, parse props)│ │    (detect vApp)                │
+                              │ 2. Upload to Content Library │ │ 2. Upload to Content Library    │
+                              │    (PUSH local / PULL remote)│ │    (PUSH local / PULL remote)   │
+                              │ 3. Wait for VMI in namespace │ │ 3. Deploy VM via vSphere REST   │
+                              │ 4. Create VirtualMachine CR  │ │    API (random DC/cluster/DS)   │
+                              │ 5. Poll for PoweredOn state  │ │ 4. Poll for PoweredOn state     │
+                              │ 6. Record result + update    │ │ 5. Record result + update       │
+                              │    HTML report               │ │    HTML report                  │
+                              └─────────────────────────────┘ │ 6. Always delete VM + CL item   │
+                                                               └─────────────────────────────────┘
 ```
 
 Upload strategy:

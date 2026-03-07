@@ -337,6 +337,165 @@ class VCenterClient:
             container.Destroy()
         return False
 
+    def get_default_deploy_target(self,
+                                   datacenter: Optional[str] = None,
+                                   cluster: Optional[str] = None,
+                                   datastore: Optional[str] = None) -> dict:
+        """
+        Return a deploy target dict with resource_pool_id, folder_id, and datastore_id.
+
+        If datacenter/cluster/datastore names are not provided, auto-picks the first
+        available ones from the vCenter inventory via REST API.
+        """
+        # List datacenters
+        dc_url = f"https://{self.host}/api/vcenter/datacenter"
+        dcs = self.rest_session.get(dc_url).json()
+        if not dcs:
+            raise RuntimeError("No datacenters found in vCenter")
+        if datacenter:
+            dc = next((d for d in dcs if d.get("name") == datacenter), None)
+            if not dc:
+                raise RuntimeError(f"Datacenter '{datacenter}' not found")
+        else:
+            dc = dcs[0]
+        dc_id = dc["datacenter"]
+        print(f"  Using datacenter: {dc['name']} ({dc_id})")
+
+        # List clusters in datacenter
+        cl_url = f"https://{self.host}/api/vcenter/cluster"
+        cl_params = {"filter.datacenters": dc_id}
+        clusters = self.rest_session.get(cl_url, params=cl_params).json()
+        if not clusters:
+            raise RuntimeError(f"No clusters found in datacenter '{dc['name']}'")
+        if cluster:
+            cl = next((c for c in clusters if c.get("name") == cluster), None)
+            if not cl:
+                raise RuntimeError(f"Cluster '{cluster}' not found")
+        else:
+            cl = clusters[0]
+        cl_id = cl["cluster"]
+        print(f"  Using cluster: {cl['name']} ({cl_id})")
+
+        # Get the cluster's root resource pool
+        cl_detail = self.rest_session.get(
+            f"https://{self.host}/api/vcenter/cluster/{cl_id}"
+        ).json()
+        rp_id = cl_detail.get("resource_pool")
+        if not rp_id:
+            raise RuntimeError(f"Could not find resource pool for cluster '{cl['name']}'")
+        print(f"  Using resource pool: {rp_id}")
+
+        # Get the datacenter's default VM folder
+        dc_detail = self.rest_session.get(
+            f"https://{self.host}/api/vcenter/datacenter/{dc_id}"
+        ).json()
+        folder_id = dc_detail.get("vm_folder")
+        if not folder_id:
+            raise RuntimeError(f"Could not find VM folder for datacenter '{dc['name']}'")
+        print(f"  Using VM folder: {folder_id}")
+
+        # List datastores accessible from the cluster
+        ds_url = f"https://{self.host}/api/vcenter/datastore"
+        ds_params = {"filter.datacenters": dc_id}
+        datastores = self.rest_session.get(ds_url, params=ds_params).json()
+        if not datastores:
+            raise RuntimeError(f"No datastores found in datacenter '{dc['name']}'")
+        if datastore:
+            ds = next((d for d in datastores if d.get("name") == datastore), None)
+            if not ds:
+                raise RuntimeError(f"Datastore '{datastore}' not found")
+        else:
+            # Prefer a writable, non-local datastore
+            writable = [d for d in datastores
+                        if d.get("accessible") and d.get("type") not in ("VSAN",)]
+            ds = writable[0] if writable else datastores[0]
+        ds_id = ds["datastore"]
+        print(f"  Using datastore: {ds['name']} ({ds_id})")
+
+        return {
+            "resource_pool_id": rp_id,
+            "folder_id": folder_id,
+            "datastore_id": ds_id,
+        }
+
+    def deploy_library_item(self, item_id: str, vm_name: str,
+                             resource_pool_id: str, folder_id: str,
+                             datastore_id: str) -> str:
+        """
+        Deploy a content library item as a VM using the vSphere REST API.
+        Returns the VM ID of the deployed VM.
+        """
+        url = f"https://{self.host}/api/vcenter/ovf/library-item/{item_id}?action=deploy"
+        spec = {
+            "deployment_spec": {
+                "name": vm_name,
+                "accept_all_EULA": True,
+                "storage_provisioning": "thin",
+                "default_datastore_id": datastore_id,
+            },
+            "target": {
+                "resource_pool_id": resource_pool_id,
+                "folder_id": folder_id,
+            }
+        }
+        response = self.rest_session.post(url, json=spec)
+        if not response.ok:
+            raise RuntimeError(
+                f"Failed to deploy library item: "
+                f"{response.status_code} {response.reason}\n{response.text}"
+            )
+        result = response.json()
+        # Response contains succeeded flag and resource_id with vm id
+        if not result.get("succeeded"):
+            errors = result.get("errors", [])
+            raise RuntimeError(f"OVF deploy failed: {errors}")
+        vm_id = result.get("resource_id", {}).get("id")
+        if not vm_id:
+            raise RuntimeError(f"Deploy succeeded but no VM ID returned: {result}")
+        print(f"  Deployed VM '{vm_name}' with ID: {vm_id}")
+        return vm_id
+
+    def power_on_vm_by_id(self, vm_id: str) -> None:
+        """Power on a VM by its vSphere VM ID."""
+        url = f"https://{self.host}/api/vcenter/vm/{vm_id}/power?action=start"
+        response = self.rest_session.post(url)
+        if not response.ok and response.status_code != 400:
+            # 400 may mean already powered on
+            raise RuntimeError(
+                f"Failed to power on VM {vm_id}: "
+                f"{response.status_code} {response.reason}\n{response.text}"
+            )
+
+    def wait_for_vm_powered_on_by_id(self, vm_id: str,
+                                      timeout: int = VM_TOOLS_WAIT_TIMEOUT) -> bool:
+        """
+        Poll VM power state by VM ID via REST API until powered on or timeout.
+        Returns True if powered on within timeout.
+        """
+        url = f"https://{self.host}/api/vcenter/vm/{vm_id}/power"
+        start = time.time()
+        while time.time() - start < timeout:
+            r = self.rest_session.get(url)
+            if r.ok and r.json().get("state") == "POWERED_ON":
+                return True
+            time.sleep(POLL_INTERVAL)
+        return False
+
+    def delete_vm_by_id(self, vm_id: str) -> None:
+        """Power off and delete a VM by its vSphere VM ID (best-effort)."""
+        try:
+            self.rest_session.post(
+                f"https://{self.host}/api/vcenter/vm/{vm_id}/power?action=stop"
+            )
+        except Exception:
+            pass
+        try:
+            r = self.rest_session.delete(f"https://{self.host}/api/vcenter/vm/{vm_id}")
+            if r.ok:
+                print(f"  Deleted VM {vm_id}")
+        except Exception as e:
+            print(f"  Warning: could not delete VM {vm_id}: {e}")
+
     def get_supervisor_credentials(self) -> tuple[str, str]:
         """
         Get Supervisor IP and password from vCenter.
@@ -1879,6 +2038,141 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             vcenter.disconnect()
 
 
+def cmd_validate(args: argparse.Namespace) -> int:
+    """
+    Validate OVFs by uploading to a content library and deploying directly via
+    vSphere API (no VM Service / Supervisor required). Each VM is deleted after
+    the test regardless of outcome.
+    """
+    entries = load_ovf_list(args.csv)
+    if not entries:
+        print(f"ERROR: No valid entries found in {args.csv}")
+        return 1
+
+    report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
+    results: list[DeployResult] = []
+
+    def record(result: DeployResult) -> None:
+        results.append(result)
+        write_report(results, report_path)
+
+    vcenter: Optional[VCenterClient] = None
+    try:
+        vcenter = VCenterClient(
+            args.vcenter,
+            args.vcenter_user,
+            args.vcenter_password,
+            args.vcenter_root_password,
+        )
+        vcenter.connect()
+
+        library_id = vcenter.find_content_library(args.content_library)
+        if not library_id:
+            print(f"ERROR: Content library '{args.content_library}' not found")
+            return 1
+
+        target = vcenter.get_default_deploy_target(
+            datacenter=args.datacenter,
+            cluster=args.cluster,
+            datastore=args.datastore,
+        )
+
+        for entry in entries:
+            vm_name = vm_name_from_item(entry.name)
+            item_name = entry.name
+            print(f"\n[{entry.name}] source={entry.source}")
+
+            vm_id: Optional[str] = None
+            try:
+                ovf_info = fetch_ovf_info(entry.source)
+                if ovf_info and ovf_info.is_vapp:
+                    print("    Type: vApp — skipping, not supported")
+                    record(DeployResult(
+                        name=entry.name, source=entry.source, vm_name=vm_name,
+                        status="SKIPPED", reason="Multi-VM OVF not supported by VM Service"
+                    ))
+                    continue
+
+                try:
+                    vcenter.upload_ovf(library_id, entry.source, item_name)
+                except UntrustedSourceError:
+                    record(DeployResult(
+                        name=entry.name, source=entry.source, vm_name=vm_name,
+                        status="SKIPPED",
+                        reason="Source TLS certificate expired or not trusted by vCenter"
+                    ))
+                    continue
+                except Exception as e:
+                    record(DeployResult(
+                        name=entry.name, source=entry.source, vm_name=vm_name,
+                        status="SETUP_FAILED",
+                        reason=f"Content library upload failed: {e}"
+                    ))
+                    continue
+
+                cl_item = vcenter.find_library_item(library_id, item_name)
+                if not cl_item:
+                    record(DeployResult(
+                        name=entry.name, source=entry.source, vm_name=vm_name,
+                        status="FAILED", reason="Library item not found after upload"
+                    ))
+                    continue
+
+                vm_id = vcenter.deploy_library_item(
+                    cl_item["id"], vm_name,
+                    target["resource_pool_id"],
+                    target["folder_id"],
+                    target["datastore_id"],
+                )
+
+                vcenter.power_on_vm_by_id(vm_id)
+                powered_on = vcenter.wait_for_vm_powered_on_by_id(vm_id)
+
+                if powered_on:
+                    record(DeployResult(
+                        name=entry.name, source=entry.source, vm_name=vm_name,
+                        status="SUCCESS", reason="VM powered on"
+                    ))
+                else:
+                    record(DeployResult(
+                        name=entry.name, source=entry.source, vm_name=vm_name,
+                        status="FAILED",
+                        reason="VM did not reach PoweredOn state within timeout"
+                    ))
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                record(DeployResult(
+                    name=entry.name, source=entry.source, vm_name=vm_name,
+                    status="FAILED", reason=str(e)
+                ))
+            finally:
+                # Always clean up — this is a validation run
+                if vm_id:
+                    vcenter.delete_vm_by_id(vm_id)
+                try:
+                    cl_item = vcenter.find_library_item(library_id, item_name)
+                    if cl_item:
+                        vcenter.delete_library_item(cl_item["id"])
+                        print(f"  Deleted content library item '{item_name}'")
+                except Exception as e:
+                    print(f"  Warning: could not delete CL item '{item_name}': {e}")
+
+        write_report(results, report_path)
+        return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    finally:
+        if vcenter:
+            vcenter.disconnect()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="OVF deploy test tool for VM Service on Supervisor"
@@ -1947,13 +2241,50 @@ def main() -> int:
     )
     p_deploy.add_argument(
         "--report",
-        help="Path to write the results report (default: <csv>.report.txt)"
+        help="Path to write the results report (default: <csv>.report.html)"
+    )
+
+    # --- validate subcommand ---
+    p_validate = sub.add_parser(
+        "validate",
+        help="Validate OVFs by deploying directly via vSphere API (no Supervisor needed)"
+    )
+    p_validate.add_argument(
+        "csv",
+        help="CSV file with OVFs to validate (name,source[,config_file])"
+    )
+    _add_vcenter_args(p_validate)
+    p_validate.add_argument(
+        "--content-library",
+        default=DEFAULT_CONTENT_LIBRARY,
+        help=f"Content library name to use for staging (default: {DEFAULT_CONTENT_LIBRARY})"
+    )
+    p_validate.add_argument(
+        "--datacenter",
+        default=None,
+        help="Datacenter name to deploy into (default: first available)"
+    )
+    p_validate.add_argument(
+        "--cluster",
+        default=None,
+        help="Cluster name to deploy into (default: first available)"
+    )
+    p_validate.add_argument(
+        "--datastore",
+        default=None,
+        help="Datastore name to deploy into (default: first writable)"
+    )
+    p_validate.add_argument(
+        "--report",
+        help="Path to write the results report (default: <csv>.report.html)"
     )
 
     args = parser.parse_args()
 
     if args.command == "discover":
         return cmd_discover(args)
+    elif args.command == "validate":
+        return cmd_validate(args)
     else:
         return cmd_deploy(args)
 
