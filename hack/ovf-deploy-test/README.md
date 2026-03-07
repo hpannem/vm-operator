@@ -67,7 +67,10 @@ usage: ovf_deploy_test.py deploy [-h] --vcenter HOST --vcenter-password PASS
                                   [--vcenter-root-password PASS]
                                   [--supervisor-root-password PASS]
                                   [--namespace NS] [--content-library NAME]
-                                  [--vm-class CLASS] [--cleanup] [--report PATH]
+                                  [--vm-class CLASS] [--storage-class CLASS]
+                                  [--network-type {nsx,vds}]
+                                  [--cleanup] [--no-cleanup-cl]
+                                  [--report PATH]
                                   csv
 
 positional arguments:
@@ -86,7 +89,8 @@ options:
   --vm-class CLASS          VM class to use (default: best-effort-xsmall)
   --storage-class CLASS     Storage class for VM disks (default: wcpglobal-storage-profile)
   --network-type {nsx,vds}  Network type: nsx uses SubnetSet, vds uses Network (default: nsx)
-  --cleanup                 Delete each VM and its content library item after deployment (errors ignored)
+  --cleanup                 Delete each VM after deployment (errors ignored)
+  --no-cleanup-cl           When --cleanup is set, skip deleting the content library item
   --report PATH             Path to write the HTML report (default: <csv>.report.html)
 ```
 
