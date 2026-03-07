@@ -229,6 +229,11 @@ func fastDeploy(
 				// already, otherwise this was a disk entry
 				// from the OVF that was meant to be an empty
 				// disk.
+				if j >= len(dstDiskPaths) {
+					return nil, fmt.Errorf(
+						"invalid disk count: config spec has more file-backed disks (%d) than cached disk paths (%d)",
+						j+1, len(dstDiskPaths))
+				}
 				fb.FileName = dstDiskPaths[j]
 				j++
 			}
