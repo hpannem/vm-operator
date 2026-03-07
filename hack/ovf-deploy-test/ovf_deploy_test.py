@@ -34,6 +34,7 @@ Requirements:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import io
 import json
 import os
@@ -41,7 +42,7 @@ import re
 import ssl
 import sys
 import tarfile
-import tempfile
+import threading
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -246,6 +247,31 @@ def fetch_ovf_from_file(ova_path: str) -> Optional[OvfInfo]:
     return None
 
 
+class _VCenterSession(requests.Session):
+    """
+    requests.Session that automatically re-authenticates on 401 and retries
+    the request once. This handles vCenter REST session expiry during long runs.
+    """
+
+    def __init__(self, client: "VCenterClient") -> None:
+        super().__init__()
+        self._vc_client = client
+        self._refreshing = False
+
+    def request(self, method, url, **kwargs):
+        response = super().request(method, url, **kwargs)
+        if response.status_code == 401 and not self._refreshing:
+            # Session expired — re-authenticate and retry once.
+            print("  REST session expired (401), re-authenticating...")
+            self._refreshing = True
+            try:
+                self._vc_client._create_rest_session()
+            finally:
+                self._refreshing = False
+            response = super().request(method, url, **kwargs)
+        return response
+
+
 class VCenterClient:
     """Client for vCenter operations using pyvmomi."""
 
@@ -281,8 +307,9 @@ class VCenterClient:
 
     def _create_rest_session(self) -> None:
         """Create REST API session for Content Library and vSphere API operations."""
-        self.rest_session = requests.Session()
-        self.rest_session.verify = False
+        if self.rest_session is None:
+            self.rest_session = _VCenterSession(self)
+            self.rest_session.verify = False
         auth_url = f"https://{self.host}/api/session"
         response = self.rest_session.post(auth_url, auth=(self.user, self.password))
         response.raise_for_status()
@@ -333,7 +360,8 @@ class VCenterClient:
     def get_default_deploy_target(self,
                                    datacenter: Optional[str] = None,
                                    cluster: Optional[str] = None,
-                                   datastore: Optional[str] = None) -> dict:
+                                   datastore: Optional[str] = None,
+                                   resource_pool: Optional[str] = None) -> dict:
         """
         Return a deploy target dict with resource_pool_id, folder_id, and datastore_id.
 
@@ -382,12 +410,33 @@ class VCenterClient:
             cl_obj = clusters_in_dc[0]
         print(f"  Using cluster: {cl_obj.name}")
 
-        # Root resource pool of the cluster
-        rp_obj = cl_obj.resourcePool
-        if not rp_obj:
-            raise RuntimeError(f"No resource pool found for cluster '{cl_obj.name}'")
+        # Resolve resource pool: explicit name > cluster root RP.
+        def _print_rp_tree(pool, prefix=""):
+            print(f"  {prefix}{pool.name} ({pool._moId})")
+            for child in pool.resourcePool:
+                _print_rp_tree(child, prefix + "  ")
+
+        print(f"  Resource pool tree for cluster '{cl_obj.name}':")
+        _print_rp_tree(cl_obj.resourcePool)
+
+        if resource_pool:
+            def _find_rp(pool, name):
+                if pool.name == name:
+                    return pool
+                for child in pool.resourcePool:
+                    found = _find_rp(child, name)
+                    if found:
+                        return found
+                return None
+            rp_obj = _find_rp(cl_obj.resourcePool, resource_pool)
+            if not rp_obj:
+                raise RuntimeError(f"Resource pool '{resource_pool}' not found in cluster '{cl_obj.name}'")
+        else:
+            rp_obj = cl_obj.resourcePool
+            if not rp_obj:
+                raise RuntimeError(f"No resource pool found for cluster '{cl_obj.name}'")
         rp_id = rp_obj._moId
-        print(f"  Using resource pool: {rp_id}")
+        print(f"  Using resource pool: {rp_obj.name} ({rp_id})")
 
         # VM folder of the datacenter
         folder_id = dc_obj.vmFolder._moId
@@ -418,25 +467,59 @@ class VCenterClient:
             "datastore_id": ds_id,
         }
 
+    def _filter_library_item(self, item_id: str, resource_pool_id: str) -> dict:
+        """
+        Call the OVF filter action to get deployment requirements (storage groups,
+        network mappings, etc.) for a library item against a given target.
+        Returns the filter result dict, or {} on failure.
+        """
+        url = f"https://{self.host}/api/vcenter/ovf/library-item/{item_id}?action=filter"
+        body = {"target": {"resource_pool_id": resource_pool_id}}
+        response = self.rest_session.post(url, json=body)
+        if response.ok:
+            return response.json()
+        return {}
+
     def deploy_library_item(self, item_id: str, vm_name: str,
                              resource_pool_id: str, folder_id: str,
-                             datastore_id: str) -> str:
+                             datastore_id: str) -> tuple[str, str]:
         """
-        Deploy a content library item as a VM using the vSphere REST API.
-        Returns the VM MoRef ID of the deployed VM.
+        Deploy a content library item using the vSphere REST API.
+        Returns (resource_id, resource_type) where resource_type is
+        'VirtualMachine' or 'VirtualApp'.
         """
+        # Discover storage groups so we can map them all to the default datastore.
+        # The filter API returns storage_groups as a list of string IDs matching
+        # vmw:StorageGroupSection vmw:id values in the OVF descriptor.
+        ovf_summary = self._filter_library_item(item_id, resource_pool_id)
+        storage_group_ids = [sg for sg in ovf_summary.get("storage_groups", [])
+                             if isinstance(sg, str)]
+        storage_mappings = {
+            sg_id: {
+                "type": "DATASTORE",
+                "datastore_id": datastore_id,
+                "provisioning": "thin",
+            }
+            for sg_id in storage_group_ids
+        }
+        if storage_mappings:
+            print(f"  Mapping storage groups to default datastore: {list(storage_mappings)}")
+
         url = f"https://{self.host}/api/vcenter/ovf/library-item/{item_id}?action=deploy"
+        deployment_spec: dict = {
+            "name": vm_name,
+            "accept_all_EULA": True,
+            "storage_provisioning": "thin",
+            "default_datastore_id": datastore_id,
+        }
+        if storage_mappings:
+            deployment_spec["storage_mappings"] = storage_mappings
         body = {
             "target": {
                 "resource_pool_id": resource_pool_id,
                 "folder_id": folder_id,
             },
-            "deployment_spec": {
-                "name": vm_name,
-                "accept_all_EULA": True,
-                "storage_provisioning": "thin",
-                "default_datastore_id": datastore_id,
-            },
+            "deployment_spec": deployment_spec,
         }
         response = self.rest_session.post(url, json=body)
         if not response.ok:
@@ -445,11 +528,25 @@ class VCenterClient:
                 f"{response.status_code} {response.reason} {response.text}"
             )
         result = response.json()
-        vm_id = result.get("resource_id", {}).get("id")
-        if not vm_id:
-            raise RuntimeError(f"Deploy returned no VM ID: {result}")
-        print(f"  Deployed VM '{vm_name}' with ID: {vm_id}")
-        return vm_id
+        if not result.get("succeeded"):
+            # Extract the most useful error/warning messages from the vCenter response.
+            msgs = []
+            error_block = result.get("error") or {}
+            for err in error_block.get("errors", []):
+                inner = err.get("error", {})
+                for m in inner.get("messages", []):
+                    msgs.append(m.get("default_message", ""))
+            for warn in error_block.get("warnings", []):
+                for issue in warn.get("issues", []):
+                    msgs.append(issue.get("message", {}).get("default_message", ""))
+            reason = "; ".join(m for m in msgs if m) or str(result)
+            raise RuntimeError(f"Deploy failed: {reason}")
+        resource_id = result.get("resource_id", {}).get("id")
+        resource_type = result.get("resource_id", {}).get("type", "VirtualMachine")
+        if not resource_id:
+            raise RuntimeError(f"Deploy returned no resource ID: {result}")
+        print(f"  Deployed {resource_type} '{vm_name}' with ID: {resource_id}")
+        return resource_id, resource_type
 
     def power_on_vm_by_id(self, vm_id: str) -> None:
         """Power on a VM by its vSphere VM ID."""
@@ -491,6 +588,71 @@ class VCenterClient:
                 print(f"  Deleted VM {vm_id}")
         except Exception as e:
             print(f"  Warning: could not delete VM {vm_id}: {e}")
+
+    def delete_existing_by_name(self, name: str) -> None:
+        """Delete any VM or vApp with the given name (best-effort pre-deploy cleanup)."""
+        from pyVmomi import vim as _vim
+        from pyVim.task import WaitForTask
+        content = self.si.RetrieveContent()
+        for obj_type in (_vim.VirtualApp, _vim.VirtualMachine):
+            view = content.viewManager.CreateContainerView(
+                content.rootFolder, [obj_type], True
+            )
+            try:
+                matches = [o for o in view.view if o.name == name]
+            finally:
+                view.Destroy()
+            for obj in matches:
+                print(f"  Pre-deploy cleanup: deleting existing {obj_type.__name__} '{name}' ({obj._moId})")
+                try:
+                    task = obj.PowerOff(force=True) if isinstance(obj, _vim.VirtualApp) else obj.PowerOff()
+                    WaitForTask(task)
+                except Exception:
+                    pass
+                try:
+                    WaitForTask(obj.Destroy())
+                except Exception as e:
+                    print(f"  Warning: could not delete {obj_type.__name__} '{name}': {e}")
+
+    def power_on_vapp_by_id(self, vapp_id: str) -> None:
+        """Power on a vApp by its MoRef ID using the SOAP API."""
+        from pyVmomi import vim as _vim
+        vapp = _vim.VirtualApp(vapp_id)
+        vapp._stub = self.si._stub
+        task = vapp.PowerOn()
+        from pyVim.task import WaitForTask
+        WaitForTask(task)
+
+    def wait_for_vapp_powered_on_by_id(self, vapp_id: str,
+                                        timeout: int = VM_TOOLS_WAIT_TIMEOUT) -> bool:
+        """Poll vApp power state via SOAP until powered on or timeout."""
+        from pyVmomi import vim as _vim
+        vapp = _vim.VirtualApp(vapp_id)
+        vapp._stub = self.si._stub
+        start = time.time()
+        while time.time() - start < timeout:
+            if vapp.summary.vAppState == "started":
+                return True
+            time.sleep(POLL_INTERVAL)
+        return False
+
+    def delete_vapp_by_id(self, vapp_id: str) -> None:
+        """Power off and delete a vApp by its MoRef ID using the SOAP API (best-effort)."""
+        from pyVmomi import vim as _vim
+        from pyVim.task import WaitForTask
+        vapp = _vim.VirtualApp(vapp_id)
+        vapp._stub = self.si._stub
+        try:
+            task = vapp.PowerOff(force=True)
+            WaitForTask(task)
+        except Exception:
+            pass
+        try:
+            task = vapp.Destroy()
+            WaitForTask(task)
+            print(f"  Deleted vApp {vapp_id}")
+        except Exception as e:
+            print(f"  Warning: could not delete vApp {vapp_id}: {e}")
 
     def get_supervisor_credentials(self) -> tuple[str, str]:
         """
@@ -615,6 +777,9 @@ class VCenterClient:
         for item_id in item_ids:
             item_url = f"https://{self.host}/api/content/library/item/{item_id}"
             item_response = self.rest_session.get(item_url)
+            if item_response.status_code == 404:
+                # Item was deleted between the list and the fetch — skip it.
+                continue
             item_response.raise_for_status()
             item_info = item_response.json()
             if item_info.get("name") == item_name:
@@ -702,9 +867,19 @@ class VCenterClient:
                     raise UntrustedSourceError(
                         f"Source server TLS certificate not trusted by vCenter: {body}"
                     )
+                # Extract the human-readable message from the JSON error body.
+                reason = body
+                try:
+                    err_json = response.json()
+                    msgs = [m.get("default_message", "")
+                            for m in err_json.get("messages", [])
+                            if m.get("default_message")]
+                    if msgs:
+                        reason = " ".join(msgs)
+                except Exception:
+                    pass
                 raise RuntimeError(
-                    f"Failed to complete update session: "
-                    f"{response.status_code} {response.reason}\n{body}"
+                    f"Failed to complete update session: {reason}"
                 )
             print("  Upload completed successfully")
 
@@ -761,7 +936,10 @@ class VCenterClient:
                 details = {}
                 for f in files:
                     if f.get("status") == "ERROR":
-                        details[f["name"]] = f.get("error_message") or f.get("status")
+                        err = f.get("error_message")
+                        if isinstance(err, dict):
+                            err = err.get("default_message") or str(err)
+                        details[f["name"]] = err or f.get("status")
                 details_str = str(details)
                 if "certificate" in details_str.lower() and (
                     "expired" in details_str.lower() or "not trusted" in details_str.lower()
@@ -909,11 +1087,7 @@ class VCenterClient:
                                ssl_cert: Optional[str] = None) -> None:
         """
         Register a file for PULL transfer in the update session.
-        ssl_cert should be the full PEM chain so vCenter can verify the remote server.
-
-        Falls back to PUSH (download locally then stream to vCenter) if vCenter
-        returns a server-side error (e.g. 500 "transferSessionId is null") that
-        indicates it cannot initiate the PULL transfer.
+        vCenter will fetch the file directly from the URL and report any errors.
         """
         add_spec = {
             "name": filename,
@@ -927,34 +1101,19 @@ class VCenterClient:
 
         add_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}/file"
         response = self.rest_session.post(add_url, json=add_spec)
-        if response.ok:
-            print(f"  Added file {filename} (PULL from URL)")
-            return
-
-        # On server-side errors fall back to PUSH: download the file locally then stream it
-        if response.status_code >= 500:
-            print(f"  PULL failed ({response.status_code}), falling back to PUSH for {filename}")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp:
-                tmp_path = tmp.name
-            try:
-                dl = requests.get(file_url, verify=False, stream=True, timeout=300)
-                dl.raise_for_status()
-                with open(tmp_path, 'wb') as f:
-                    for chunk in dl.iter_content(chunk_size=8 * 1024 * 1024):
-                        f.write(chunk)
-                self._upload_file_from_path(session_id, filename, tmp_path)
-                print(f"  Uploaded file {filename} (PUSH fallback)")
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-            return
-
-        raise RuntimeError(
-            f"Failed to add file {filename} for PULL: "
-            f"{response.status_code} {response.reason}\n{response.text}"
-        )
+        if not response.ok:
+            if response.status_code >= 500:
+                # vCenter internal error registering the PULL (e.g. relative path in OVF).
+                # Don't raise — let the session proceed to complete so vCenter reports
+                # the real validation error from the task.
+                print(f"  Warning: could not register PULL for {filename} "
+                      f"({response.status_code}), vCenter will report the reason at complete")
+                return
+            raise RuntimeError(
+                f"Failed to add file {filename} for PULL: "
+                f"{response.status_code} {response.reason}\n{response.text}"
+            )
+        print(f"  Added file {filename} (PULL from {file_url})")
 
     def _upload_file_content(self, session_id: str, filename: str, content: bytes) -> None:
         """Upload small file content (e.g. OVF descriptor) directly to the update session."""
@@ -1357,9 +1516,6 @@ def discover_ovfs(base_url: str) -> list[str]:
     Returns:
         Sorted list of OVF/OVA download URLs
     """
-    import concurrent.futures
-    import threading
-
     print(f"Discovering OVFs from {base_url}...")
 
     # Derive host and repo/path to build the UI native browser API URL.
@@ -1871,22 +2027,38 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         libraries = supervisor.list_content_libraries(args.namespace)
         print(f"Content libraries in namespace: {libraries}")
 
+        # Setup connections are no longer needed — each worker creates its own
+        supervisor.disconnect()
+        supervisor = None
+        vcenter.disconnect()
+        vcenter = None
+
         results: list[DeployResult] = []
         report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
+        results_lock = threading.Lock()
 
         def record(result: DeployResult) -> None:
-            results.append(result)
-            write_report(results, report_path)
+            with results_lock:
+                results.append(result)
+                write_report(results, report_path)
 
-        for entry in entries:
+        def deploy_one(entry: OvfEntry) -> None:
+            vm_name = vm_name_from_item(entry.name)
+            item_name = entry.name
             print(f"\n{'=' * 60}")
             print(f"Deploying: {entry.name}  ({entry.source})")
             print(f"{'=' * 60}")
-            vm_name = vm_name_from_item(entry.name)
-            try:
-                item_name = entry.name
-                print(f"  Item name: '{item_name}' -> VM name: '{vm_name}'")
 
+            vc = VCenterClient(
+                args.vcenter, args.vcenter_user,
+                args.vcenter_password, args.vcenter_root_password
+            )
+            sv = SupervisorClient(supervisor_ip, supervisor_password)
+            try:
+                vc.connect()
+                sv.connect()
+
+                print(f"  Item name: '{item_name}' -> VM name: '{vm_name}'")
                 print("  Parsing OVF descriptor...")
                 ovf_info = fetch_ovf_info(entry.source)
                 if ovf_info:
@@ -1896,7 +2068,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                             name=entry.name, source=entry.source, vm_name=vm_name,
                             status="SKIPPED", reason="Multi-VM OVF not supported by VM Service"
                         ))
-                        continue
+                        return
                     if ovf_info.has_networks():
                         print(f"    Networks: {[n.name for n in ovf_info.networks]}")
                     if ovf_info.has_properties():
@@ -1909,33 +2081,32 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     vapp_config = load_vapp_config(entry.config_file)
 
                 try:
-                    vcenter.upload_ovf(library_id, entry.source, item_name)
+                    vc.upload_ovf(library_id, entry.source, item_name)
                 except UntrustedSourceError:
                     raise
                 except Exception as upload_err:
                     raise SetupError(f"Content library upload failed: {upload_err}") from upload_err
 
-                vmi_name, vmi_error, failed_vmi_name = supervisor.wait_for_vmi(args.namespace, item_name)
+                vmi_name, vmi_error, failed_vmi_name = sv.wait_for_vmi(args.namespace, item_name)
                 if not vmi_name:
-                    # Search logs by VMI CR name (e.g. vmi-abc123) if we saw it, plus item name
                     search_terms = [t for t in [failed_vmi_name, item_name] if t]
-                    logs = supervisor.get_vmop_logs(*search_terms)
+                    logs = sv.get_vmop_logs(*search_terms)
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
                         status="FAILED",
                         reason=vmi_error or f"VirtualMachineImage for '{item_name}' never appeared",
                         vmop_logs=logs
                     ))
-                    continue
+                    return
 
-                _, _, rc = supervisor.run_kubectl(
+                _, _, rc = sv.run_kubectl(
                     f"get vm -n {args.namespace} {vm_name}", check=False
                 )
                 if rc == 0:
                     print(f"  VM '{vm_name}' already exists, deleting...")
-                    supervisor.delete_vm(args.namespace, vm_name)
+                    sv.delete_vm(args.namespace, vm_name)
                     for _ in range(30):
-                        _, _, rc = supervisor.run_kubectl(
+                        _, _, rc = sv.run_kubectl(
                             f"get vm -n {args.namespace} {vm_name}", check=False
                         )
                         if rc != 0:
@@ -1945,7 +2116,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                         print("  Warning: VM deletion timed out, proceeding anyway")
 
                 vm_start_time = time.time()
-                supervisor.create_vm(
+                sv.create_vm(
                     namespace=args.namespace,
                     vm_name=vm_name,
                     image_name=vmi_name,
@@ -1956,7 +2127,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     vapp_config=vapp_config,
                 )
 
-                powered_on, _ = supervisor.wait_for_vm_powered_on(args.namespace, vm_name, vcenter=vcenter)
+                powered_on, _ = sv.wait_for_vm_powered_on(args.namespace, vm_name, vcenter=vc)
 
                 if powered_on:
                     record(DeployResult(
@@ -1964,9 +2135,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                         status="SUCCESS", reason="VM powered on"
                     ))
                 else:
-                    elapsed = int(time.time() - vm_start_time) + 30  # 30s buffer
-                    reason = supervisor.get_vm_status_reason(args.namespace, vm_name)
-                    logs = supervisor.get_vmop_logs_for_vm(vm_name, since_seconds=elapsed)
+                    elapsed = int(time.time() - vm_start_time) + 30
+                    reason = sv.get_vm_status_reason(args.namespace, vm_name)
+                    logs = sv.get_vmop_logs_for_vm(vm_name, since_seconds=elapsed)
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
                         status="FAILED",
@@ -1976,19 +2147,19 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
                 if args.cleanup:
                     try:
-                        supervisor.delete_vm(args.namespace, vm_name)
+                        sv.delete_vm(args.namespace, vm_name)
                     except Exception as e:
                         print(f"  Warning: cleanup VM failed: {e}")
                     if not args.no_cleanup_cl:
                         try:
-                            cl_item = vcenter.find_library_item(library_id, item_name)
+                            cl_item = vc.find_library_item(library_id, item_name)
                             if cl_item:
-                                vcenter.delete_library_item(cl_item["id"])
+                                vc.delete_library_item(cl_item["id"])
                                 print(f"  Deleted content library item '{item_name}'")
                         except Exception as e:
                             print(f"  Warning: cleanup CL item failed: {e}")
 
-            except UntrustedSourceError as e:
+            except UntrustedSourceError:
                 print(f"  Skipping: source server TLS certificate is expired or not trusted by vCenter")
                 record(DeployResult(
                     name=entry.name, source=entry.source, vm_name=vm_name,
@@ -2005,19 +2176,30 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                # Best-effort: grab vmop logs even on exception
                 try:
-                    logs = supervisor.get_vmop_logs_for_vm(vm_name) if supervisor else ""
-                    reason_from_cr = supervisor.get_vm_status_reason(args.namespace, vm_name) if supervisor else ""
+                    logs = sv.get_vmop_logs_for_vm(vm_name)
+                    reason_from_cr = sv.get_vm_status_reason(args.namespace, vm_name)
                 except Exception:
                     logs, reason_from_cr = "", ""
-                reason = f"{e}"
+                reason = str(e)
                 if reason_from_cr:
                     reason += f". CR: {reason_from_cr}"
                 record(DeployResult(
                     name=entry.name, source=entry.source, vm_name=vm_name,
                     status="FAILED", reason=reason, vmop_logs=logs
                 ))
+
+            finally:
+                sv.disconnect()
+                vc.disconnect()
+
+        workers = getattr(args, "parallel", 1)
+        if workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(deploy_one, entries))
+        else:
+            for entry in entries:
+                deploy_one(entry)
 
         write_report(results, report_path)  # final write also prints summary to stdout
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
@@ -2048,10 +2230,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     report_path = args.report or (os.path.splitext(args.csv)[0] + "-validate.report.html")
     results: list[DeployResult] = []
+    results_lock = threading.Lock()
 
     def record(result: DeployResult) -> None:
-        results.append(result)
-        write_report(results, report_path)
+        with results_lock:
+            results.append(result)
+            write_report(results, report_path)
 
     vcenter: Optional[VCenterClient] = None
     try:
@@ -2072,60 +2256,79 @@ def cmd_validate(args: argparse.Namespace) -> int:
             datacenter=args.datacenter,
             cluster=args.cluster,
             datastore=args.datastore,
+            resource_pool=args.resource_pool,
         )
 
-        for entry in entries:
+        # Setup connection no longer needed — each worker creates its own
+        vcenter.disconnect()
+        vcenter = None
+
+        results_lock = threading.Lock()
+
+        def validate_one(entry: OvfEntry) -> None:
             vm_name = vm_name_from_item(entry.name)
             item_name = entry.name
             print(f"\n[{entry.name}] source={entry.source}")
 
-            vm_id: Optional[str] = None
+            vc = VCenterClient(
+                args.vcenter, args.vcenter_user,
+                args.vcenter_password, args.vcenter_root_password,
+            )
+            resource_id: Optional[str] = None
+            resource_type: str = "VirtualMachine"
             try:
+                vc.connect(ssh=False)
+
                 try:
-                    vcenter.upload_ovf(library_id, entry.source, item_name)
+                    vc.upload_ovf(library_id, entry.source, item_name)
                 except UntrustedSourceError:
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
                         status="SKIPPED",
                         reason="Source TLS certificate expired or not trusted by vCenter"
                     ))
-                    continue
+                    return
                 except Exception as e:
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
                         status="SETUP_FAILED",
                         reason=f"Content library upload failed: {e}"
                     ))
-                    continue
+                    return
 
-                cl_item = vcenter.find_library_item(library_id, item_name)
+                cl_item = vc.find_library_item(library_id, item_name)
                 if not cl_item:
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
                         status="FAILED", reason="Library item not found after upload"
                     ))
-                    continue
+                    return
 
-                vm_id = vcenter.deploy_library_item(
+                vc.delete_existing_by_name(vm_name)
+                resource_id, resource_type = vc.deploy_library_item(
                     cl_item["id"], vm_name,
                     target["resource_pool_id"],
                     target["folder_id"],
                     target["datastore_id"],
                 )
 
-                vcenter.power_on_vm_by_id(vm_id)
-                powered_on = vcenter.wait_for_vm_powered_on_by_id(vm_id)
+                if resource_type == "VirtualApp":
+                    vc.power_on_vapp_by_id(resource_id)
+                    powered_on = vc.wait_for_vapp_powered_on_by_id(resource_id)
+                else:
+                    vc.power_on_vm_by_id(resource_id)
+                    powered_on = vc.wait_for_vm_powered_on_by_id(resource_id)
 
                 if powered_on:
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
-                        status="SUCCESS", reason="VM powered on"
+                        status="SUCCESS", reason=f"{resource_type} powered on"
                     ))
                 else:
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
                         status="FAILED",
-                        reason="VM did not reach PoweredOn state within timeout"
+                        reason=f"{resource_type} did not reach PoweredOn state within timeout"
                     ))
 
             except Exception as e:
@@ -2136,9 +2339,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
                     status="FAILED", reason=str(e)
                 ))
             finally:
-                # Always clean up the VM — keep the CL item for reuse
-                if vm_id:
-                    vcenter.delete_vm_by_id(vm_id)
+                if resource_id:
+                    if resource_type == "VirtualApp":
+                        vc.delete_vapp_by_id(resource_id)
+                    else:
+                        vc.delete_vm_by_id(resource_id)
+                vc.disconnect()
+
+        workers = getattr(args, "parallel", 1)
+        if workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(validate_one, entries))
+        else:
+            for entry in entries:
+                validate_one(entry)
 
         write_report(results, report_path)
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
@@ -2226,6 +2440,13 @@ def main() -> int:
         help="When --cleanup is set, skip deleting the content library item"
     )
     p_deploy.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of OVFs to deploy concurrently (default: 1)"
+    )
+    p_deploy.add_argument(
         "--report",
         help="Path to write the results report (default: <csv>.report.html)"
     )
@@ -2261,8 +2482,20 @@ def main() -> int:
         help="Datastore name to deploy into (default: first writable)"
     )
     p_validate.add_argument(
+        "--resource-pool",
+        default=None,
+        help="Resource pool name to deploy into (default: cluster root resource pool)"
+    )
+    p_validate.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of OVFs to validate concurrently (default: 1)"
+    )
+    p_validate.add_argument(
         "--report",
-        help="Path to write the results report (default: <csv>.report.html)"
+        help="Path to write the results report (default: <csv>-validate.report.html)"
     )
 
     args = parser.parse_args()

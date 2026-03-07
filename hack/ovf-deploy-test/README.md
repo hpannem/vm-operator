@@ -91,31 +91,34 @@ options:
   --network-type {nsx,vds}  Network type: nsx uses SubnetSet, vds uses Network (default: nsx)
   --cleanup                 Delete each VM after deployment (errors ignored)
   --no-cleanup-cl           When --cleanup is set, skip deleting the content library item
+  --parallel N              Number of OVFs to deploy concurrently (default: 1)
   --report PATH             Path to write the HTML report (default: <csv>.report.html)
 ```
 
 ### `validate` — Validate OVFs directly via vSphere API
 
-Uploads each OVF to a content library and deploys it as a VM directly via the
-vSphere REST API (`POST /api/vcenter/ovf/library-item/{id}?action=deploy`),
-bypassing VM Service entirely. Useful for checking whether an OVF is well-formed
-and deployable without a Supervisor cluster. The VM and content library item are
-**always deleted** after each test, regardless of outcome.
+Uploads each OVF to a content library and deploys it directly via the vSphere
+REST API (`POST /api/vcenter/ovf/library-item/{id}?action=deploy`), bypassing
+VM Service entirely. Supports both single-VM OVFs and multi-VM vApps. Useful
+for checking whether an OVF is well-formed and deployable against a plain
+vCenter cluster. The deployed VM/vApp and content library item are **always
+deleted** after each test, regardless of outcome.
 
 ```bash
 python ovf_deploy_test.py validate ovfs.csv \
     --vcenter <vcenter-ip> \
-    --vcenter-password <password>
+    --vcenter-password <password> \
+    --datacenter <datacenter-name> \
+    --cluster <cluster-name>
 ```
 
 ```
 usage: ovf_deploy_test.py validate [-h] --vcenter HOST --vcenter-password PASS
                                     [--vcenter-user USER]
-                                    [--vcenter-root-password PASS]
                                     [--content-library NAME]
                                     [--datacenter NAME] [--cluster NAME]
-                                    [--datastore NAME]
-                                    [--report PATH]
+                                    [--datastore NAME] [--resource-pool NAME]
+                                    [--parallel N] [--report PATH]
                                     csv
 
 positional arguments:
@@ -125,14 +128,21 @@ options:
   --vcenter HOST            vCenter hostname or IP (required)
   --vcenter-password PASS   vCenter API password (required)
   --vcenter-user USER       vCenter username (default: administrator@vsphere.local)
-  --vcenter-root-password PASS
-                            vCenter root SSH password (default: same as --vcenter-password)
   --content-library NAME    Content library name for staging (default: ovftest)
   --datacenter NAME         Datacenter to deploy into (default: first available)
   --cluster NAME            Cluster to deploy into (default: first available)
-  --datastore NAME          Datastore to deploy into (default: first writable)
-  --report PATH             Path to write the HTML report (default: <csv>.report.html)
+  --datastore NAME          Datastore to deploy into (default: first writable non-vSAN)
+  --resource-pool NAME      Resource pool name within the cluster (default: cluster root RP).
+                            Required on Supervisor clusters — pass a non-Supervisor child RP
+                            (the script prints the full RP tree at startup to help identify it).
+  --parallel N              Number of OVFs to validate concurrently (default: 1)
+  --report PATH             Path to write the HTML report (default: <csv>-validate.report.html)
 ```
+
+> **Supervisor clusters**: the root resource pool of a Supervisor-enabled cluster
+> does not support `importVApp`. Use `--resource-pool` to target a regular child
+> resource pool. Run the script once without `--resource-pool` to see the full RP
+> tree printed at startup, then re-run with the correct name.
 
 ## CSV Format
 
@@ -208,7 +218,7 @@ for a summary table with:
 | `SUCCESS` | VM reached PoweredOn state |
 | `FAILED` | VM was created but did not reach PoweredOn within the timeout, or hit a terminal error condition |
 | `SETUP_FAILED` | Pre-deployment step failed (Content Library upload error, VMI never appeared, etc.) |
-| `SKIPPED` | OVF was intentionally not deployed (vApp/multi-VM OVF, or source TLS certificate not trusted by vCenter) |
+| `SKIPPED` | OVF was intentionally not deployed (source TLS certificate not trusted by vCenter) |
 
 ## Hardcoded Defaults
 
@@ -238,12 +248,13 @@ ovf_files.csv ──────────────► OvfEntry list       
                               │    (detect vApp, parse props)│ │    (detect vApp)                │
                               │ 2. Upload to Content Library │ │ 2. Upload to Content Library    │
                               │    (PUSH local / PULL remote)│ │    (PUSH local / PULL remote)   │
-                              │ 3. Wait for VMI in namespace │ │ 3. Deploy VM via vSphere REST   │
-                              │ 4. Create VirtualMachine CR  │ │    API (random DC/cluster/DS)   │
-                              │ 5. Poll for PoweredOn state  │ │ 4. Poll for PoweredOn state     │
-                              │ 6. Record result + update    │ │ 5. Record result + update       │
-                              │    HTML report               │ │    HTML report                  │
-                              └─────────────────────────────┘ │ 6. Always delete VM + CL item   │
+                              │ 3. Wait for VMI in namespace │ │ 3. Delete any pre-existing VM/  │
+                              │ 4. Create VirtualMachine CR  │ │    vApp with the same name      │
+                              │ 5. Poll for PoweredOn state  │ │ 4. Deploy VM or vApp via REST   │
+                              │ 6. Record result + update    │ │ 5. Poll for PoweredOn state     │
+                              │    HTML report               │ │ 6. Record result + update       │
+                              └─────────────────────────────┘ │    HTML report                  │
+                                                               │ 7. Always delete VM/vApp + CL   │
                                                                └─────────────────────────────────┘
 ```
 
