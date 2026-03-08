@@ -104,6 +104,12 @@ for checking whether an OVF is well-formed and deployable against a plain
 vCenter cluster. The deployed VM/vApp and content library item are **always
 deleted** after each test, regardless of outcome.
 
+The script automatically handles several OVF quirks:
+- XML-commented-out file references in OVF descriptors are ignored during upload
+- URLs with spaces or non-ASCII characters in paths are percent-encoded before PULL registration
+- If the OVF supports DHCP IP allocation, it is requested at deploy time to avoid requiring an IP pool on the target network
+- Each deployed VM/vApp gets a unique name suffix to avoid collisions when running with `--parallel`
+
 ```bash
 python ovf_deploy_test.py validate ovfs.csv \
     --vcenter <vcenter-ip> \
