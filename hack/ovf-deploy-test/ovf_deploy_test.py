@@ -505,6 +505,18 @@ class VCenterClient:
         if storage_mappings:
             print(f"  Mapping storage groups to default datastore: {list(storage_mappings)}")
 
+        # If the OVF has IpAllocationParams and supports DHCP, request DHCP so
+        # vCenter does not require an IP pool on the target network to power on.
+        additional_parameters = []
+        for param in ovf_summary.get("additional_params", []):
+            if param.get("type") == "IpAllocationParams":
+                supported = param.get("supported_ip_allocation_policy", [])
+                if "DHCP" in supported:
+                    ip_param = dict(param)
+                    ip_param["ip_allocation_policy"] = "DHCP"
+                    additional_parameters.append(ip_param)
+                    print("  Overriding IP allocation policy to DHCP")
+
         url = f"https://{self.host}/api/vcenter/ovf/library-item/{item_id}?action=deploy"
         deployment_spec: dict = {
             "name": vm_name,
@@ -514,6 +526,8 @@ class VCenterClient:
         }
         if storage_mappings:
             deployment_spec["storage_mappings"] = storage_mappings
+        if additional_parameters:
+            deployment_spec["additional_parameters"] = additional_parameters
         body = {
             "target": {
                 "resource_pool_id": resource_pool_id,
@@ -521,7 +535,13 @@ class VCenterClient:
             },
             "deployment_spec": deployment_spec,
         }
-        response = self.rest_session.post(url, json=body)
+        # Deploy can take a while for large OVFs; retry once on 504 gateway timeout.
+        for attempt in range(2):
+            response = self.rest_session.post(url, json=body, timeout=300)
+            if response.status_code != 504:
+                break
+            if attempt == 0:
+                print("  Deploy timed out (504), retrying...")
         if not response.ok:
             raise RuntimeError(
                 f"Failed to deploy library item: "
@@ -617,11 +637,17 @@ class VCenterClient:
     def power_on_vapp_by_id(self, vapp_id: str) -> None:
         """Power on a vApp by its MoRef ID using the SOAP API."""
         from pyVmomi import vim as _vim
+        from pyVim.task import WaitForTask
         vapp = _vim.VirtualApp(vapp_id)
         vapp._stub = self.si._stub
         task = vapp.PowerOn()
-        from pyVim.task import WaitForTask
-        WaitForTask(task)
+        try:
+            WaitForTask(task)
+        except _vim.fault.MissingIpPool as e:
+            raise RuntimeError(
+                f"vApp power-on requires an IP pool on network '{e.value}' "
+                f"(property '{e.id}'). Assign an IP pool to that network in vCenter."
+            ) from e
 
     def wait_for_vapp_powered_on_by_id(self, vapp_id: str,
                                         timeout: int = VM_TOOLS_WAIT_TIMEOUT) -> bool:
@@ -918,6 +944,10 @@ class VCenterClient:
         deadline = time.time() + timeout
         while time.time() < deadline:
             response = self.rest_session.get(files_url)
+            if response.status_code == 404:
+                # Session was auto-cancelled by vCenter (e.g. PULL registration
+                # failed). Proceed to complete so vCenter reports the real error.
+                return 0
             response.raise_for_status()
             files = response.json()
 
@@ -968,7 +998,10 @@ class VCenterClient:
         Captures any ovf:href value (vmdk, nvram, iso, etc.), excluding
         the OVF file itself and http(s) URLs (those are external references).
         """
-        refs = re.findall(r'ovf:href="([^"]+)"', ovf_content)
+        # Strip XML comments before extracting refs so commented-out File
+        # elements with bogus paths (e.g. path traversals) are not registered.
+        stripped = re.sub(r'<!--.*?-->', '', ovf_content, flags=re.DOTALL)
+        refs = re.findall(r'ovf:href="([^"]+)"', stripped)
         seen = set()
         result = []
         for ref in refs:
@@ -1083,12 +1116,22 @@ class VCenterClient:
             print(f"  Warning: Could not fetch SSL certificate: {e}")
             return None
 
+    @staticmethod
+    def _encode_url(url: str) -> str:
+        """Percent-encode spaces and other invalid URI characters in a URL's path."""
+        from urllib.parse import urlparse, quote, urlunparse
+        p = urlparse(url)
+        # quote the path, preserving '/' separators and already-encoded sequences
+        encoded_path = quote(p.path, safe='/:@!$&\'()*+,;=')
+        return urlunparse(p._replace(path=encoded_path))
+
     def _upload_file_from_url(self, session_id: str, file_url: str, filename: str,
                                ssl_cert: Optional[str] = None) -> None:
         """
         Register a file for PULL transfer in the update session.
         vCenter will fetch the file directly from the URL and report any errors.
         """
+        file_url = self._encode_url(file_url)
         add_spec = {
             "name": filename,
             "source_type": "PULL",
@@ -2266,7 +2309,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         results_lock = threading.Lock()
 
         def validate_one(entry: OvfEntry) -> None:
-            vm_name = vm_name_from_item(entry.name)
+            import uuid as _uuid
+            vm_name = vm_name_from_item(entry.name) + "-" + _uuid.uuid4().hex[:6]
             item_name = entry.name
             print(f"\n[{entry.name}] source={entry.source}")
 
