@@ -1218,6 +1218,15 @@ class SupervisorClient:
     def connect(self) -> None:
         """Connect to Supervisor via SSH."""
         print(f"Connecting to Supervisor {self.host} via SSH...")
+        self._open_ssh()
+        print("  Connected to Supervisor")
+
+    def _open_ssh(self) -> None:
+        if self.ssh:
+            try:
+                self.ssh.close()
+            except Exception:
+                pass
         self.ssh = paramiko.SSHClient()
         self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         self.ssh.connect(
@@ -1227,7 +1236,6 @@ class SupervisorClient:
             look_for_keys=False,
             allow_agent=False
         )
-        print("  Connected to Supervisor")
 
     def disconnect(self) -> None:
         """Disconnect from Supervisor."""
@@ -1238,10 +1246,19 @@ class SupervisorClient:
     def run_kubectl(self, args: str, check: bool = True) -> tuple[str, str, int]:
         """Run a kubectl command and return stdout, stderr, and return code."""
         cmd = f"kubectl {args}"
-        stdin, stdout, stderr = self.ssh.exec_command(cmd)
-        exit_code = stdout.channel.recv_exit_status()
-        stdout_str = stdout.read().decode()
-        stderr_str = stderr.read().decode()
+        for attempt in range(2):
+            try:
+                stdin, stdout, stderr = self.ssh.exec_command(cmd)
+                exit_code = stdout.channel.recv_exit_status()
+                stdout_str = stdout.read().decode()
+                stderr_str = stderr.read().decode()
+                break
+            except (paramiko.SSHException, EOFError, OSError) as e:
+                if attempt == 0:
+                    print(f"  SSH connection lost ({e}), reconnecting...")
+                    self._open_ssh()
+                else:
+                    raise RuntimeError(f"SSH connection failed after reconnect: {e}") from e
 
         if check and exit_code != 0:
             raise RuntimeError(f"kubectl command failed: {cmd}\n{stderr_str}")
@@ -2030,6 +2047,27 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
+class _LockedSupervisorClient:
+    """Thread-safe proxy around a shared SupervisorClient.
+
+    Serialises all SSH calls through a lock so parallel deploy workers
+    share one SSH connection without racing each other.
+    """
+
+    def __init__(self, client: "SupervisorClient", lock: threading.Lock) -> None:
+        self._client = client
+        self._lock = lock
+
+    def __getattr__(self, name: str):
+        attr = getattr(self._client, name)
+        if callable(attr):
+            def _locked(*args, **kwargs):
+                with self._lock:
+                    return attr(*args, **kwargs)
+            return _locked
+        return attr
+
+
 def cmd_deploy(args: argparse.Namespace) -> int:
     """Deploy OVFs listed in a CSV file via VM Service."""
     entries = load_ovf_list(args.csv)
@@ -2070,15 +2108,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         libraries = supervisor.list_content_libraries(args.namespace)
         print(f"Content libraries in namespace: {libraries}")
 
-        # Setup connections are no longer needed — each worker creates its own
-        supervisor.disconnect()
-        supervisor = None
         vcenter.disconnect()
         vcenter = None
 
         results: list[DeployResult] = []
         report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
         results_lock = threading.Lock()
+        ssh_lock = threading.Lock()
 
         def record(result: DeployResult) -> None:
             with results_lock:
@@ -2086,7 +2122,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 write_report(results, report_path)
 
         def deploy_one(entry: OvfEntry) -> None:
-            vm_name = vm_name_from_item(entry.name)
+            import uuid as _uuid
+            vm_name = vm_name_from_item(entry.name) + "-" + _uuid.uuid4().hex[:6]
             item_name = entry.name
             print(f"\n{'=' * 60}")
             print(f"Deploying: {entry.name}  ({entry.source})")
@@ -2096,10 +2133,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 args.vcenter, args.vcenter_user,
                 args.vcenter_password, args.vcenter_root_password
             )
-            sv = SupervisorClient(supervisor_ip, supervisor_password)
+            sv = _LockedSupervisorClient(supervisor, ssh_lock)
             try:
                 vc.connect()
-                sv.connect()
 
                 print(f"  Item name: '{item_name}' -> VM name: '{vm_name}'")
                 print("  Parsing OVF descriptor...")
@@ -2233,7 +2269,6 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 ))
 
             finally:
-                sv.disconnect()
                 vc.disconnect()
 
         workers = getattr(args, "parallel", 1)
