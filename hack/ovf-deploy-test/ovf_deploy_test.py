@@ -537,7 +537,7 @@ class VCenterClient:
                             label=p.get("label", ""),
                             description=p.get("description", ""),
                         )
-                        value = _smart_value_for_property(ovf_prop)
+                        value = _smart_value_for_property(ovf_prop, for_vcenter=True)
                         filled.append(dict(p, value=value))
                     additional_parameters.append({"type": "PropertyParams", "properties": filled})
                     print(f"  Auto-filled {len(filled)} OVF property/properties for deploy")
@@ -1799,14 +1799,15 @@ def load_ovf_list(path: str) -> list[OvfEntry]:
     return entries
 
 
-def _smart_value_for_property(prop: OvfProperty) -> str:
+def _smart_value_for_property(prop: OvfProperty, for_vcenter: bool = False) -> str:
     """
-    Return a smart value for an OVF property using Go template expressions
-    where the semantics are clear from the key/label/description/type, or a
-    random-but-valid fallback otherwise.
+    Return a smart value for an OVF property.
 
-    Template expressions reference the VM Operator V1alpha6 bootstrap context
-    (same as vc_vappconfig.yaml).
+    When for_vcenter=False (VM Service deploy): returns Go template expressions
+    that VM Operator evaluates at boot time from the VM's network context.
+
+    When for_vcenter=True (validate / direct vCenter deploy): returns plain
+    placeholder values that vCenter's OVF deploy API accepts as-is.
     """
     import random
     import string
@@ -1827,12 +1828,12 @@ def _smart_value_for_property(prop: OvfProperty) -> str:
         return prop.default
 
     if typ == "password":
-        # Generate a random password that satisfies common complexity rules.
         chars = string.ascii_letters + string.digits + "!@#$"
         return "VMware1!" + "".join(random.choices(chars, k=8))
 
     if typ == "ip":
-        return '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
+        return "192.0.2.1" if for_vcenter else \
+            '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
 
     # --- Key/label/description pattern matching ---
 
@@ -1844,26 +1845,31 @@ def _smart_value_for_property(prop: OvfProperty) -> str:
     if any(x in combined for x in ("prefixlen", "prefix_len", "prefix-len")) or \
        (any(x in combined for x in ("prefix", "cidr")) and
             not any(x in combined for x in ("netmask", "subnet mask", "subnetmask"))):
-        return '{{ V1alpha6_SubnetPrefixLength (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
+        return "24" if for_vcenter else \
+            '{{ V1alpha6_SubnetPrefixLength (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
 
     # Subnet mask (dotted-decimal, e.g. "255.255.255.0")
     if any(x in combined for x in ("netmask", "subnet mask", "subnetmask", "net.mask", "net_mask")):
-        return '{{ V1alpha6_SubnetMask (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
+        return "255.255.255.0" if for_vcenter else \
+            '{{ V1alpha6_SubnetMask (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
 
     # IP address (but not gateway/dns)
     if any(x in combined for x in ("ip address", "ip_address", "ipaddress", "net.addr",
                                     "net_addr", "nsx_ip", "mgmt_ip", "management ip",
                                     "pnid", "hostname")) and \
        not any(x in combined for x in ("gateway", "dns", "nameserver")):
-        return '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
+        return "192.0.2.1" if for_vcenter else \
+            '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
 
     # Gateway
     if any(x in combined for x in ("gateway", "default route", "net.gateway", "net_gateway")):
-        return "{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}"
+        return "192.0.2.254" if for_vcenter else \
+            "{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}"
 
     # DNS / nameservers
     if any(x in combined for x in ("dns", "nameserver", "name server", "net.dns")):
-        return '{{ V1alpha6_FormatNameservers -1 "," }}'
+        return "8.8.8.8" if for_vcenter else \
+            '{{ V1alpha6_FormatNameservers -1 "," }}'
 
     # Domain / search path
     if any(x in combined for x in ("domain", "searchpath", "search path", "search_path", "dnsdomain")):
