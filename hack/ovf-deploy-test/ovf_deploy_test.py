@@ -188,12 +188,16 @@ def fetch_ovf_from_url(ovf_url: str) -> Optional[OvfInfo]:
     Handles both .ovf files (fetched directly) and .ova files
     (fetched partially - only the OVF member is needed).
     """
+    from urllib.parse import quote, urlunparse
     parsed = urlparse(ovf_url)
+    # Percent-encode the path so special characters (spaces, backticks, etc.)
+    # don't confuse the requests library into treating the URL as a file path.
+    encoded_url = urlunparse(parsed._replace(path=quote(parsed.path, safe='/:@!$&\'()*+,;=')))
     filename = os.path.basename(parsed.path)
 
     try:
         if filename.endswith('.ovf'):
-            response = requests.get(ovf_url, verify=False, timeout=30)
+            response = requests.get(encoded_url, verify=False, timeout=30)
             response.raise_for_status()
             return parse_ovf(response.text)
 
@@ -201,7 +205,7 @@ def fetch_ovf_from_url(ovf_url: str) -> Optional[OvfInfo]:
             # OVA is a tar archive. Stream it, accumulating data until we can
             # successfully extract the .ovf member (typically the first entry).
             # We read up to 10MB which is more than enough for any OVF descriptor.
-            response = requests.get(ovf_url, verify=False, stream=True, timeout=60)
+            response = requests.get(encoded_url, verify=False, stream=True, timeout=60)
             response.raise_for_status()
 
             buf = io.BytesIO()
@@ -535,9 +539,16 @@ class VCenterClient:
             },
             "deployment_spec": deployment_spec,
         }
-        # Deploy can take a while for large OVFs; retry once on 504 gateway timeout.
+        # Deploy can take a while for large OVFs; retry once on 504 or read timeout.
+        import requests as _requests
         for attempt in range(2):
-            response = self.rest_session.post(url, json=body, timeout=300)
+            try:
+                response = self.rest_session.post(url, json=body, timeout=600)
+            except _requests.exceptions.ReadTimeout:
+                if attempt == 0:
+                    print("  Deploy read timed out, retrying...")
+                    continue
+                raise RuntimeError("Deploy timed out after two attempts (read timeout=600s)")
             if response.status_code != 504:
                 break
             if attempt == 0:
@@ -852,7 +863,13 @@ class VCenterClient:
         }
 
         create_url = f"https://{self.host}/api/content/library/item"
-        response = self.rest_session.post(create_url, json=create_spec)
+        for attempt in range(3):
+            response = self.rest_session.post(create_url, json=create_spec)
+            if response.status_code != 503:
+                break
+            wait = 10 * (attempt + 1)
+            print(f"  Content library service unavailable (503), retrying in {wait}s...")
+            time.sleep(wait)
         if not response.ok:
             raise RuntimeError(
                 f"Failed to create library item: "
@@ -886,6 +903,20 @@ class VCenterClient:
             response = self.rest_session.post(complete_url)
             if not response.ok:
                 body = response.text
+
+                # If the session is gone (404), vCenter auto-cancelled it due to a
+                # transfer error. Fetch the session details to get the real reason.
+                if response.status_code == 404:
+                    session_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}"
+                    detail_resp = self.rest_session.get(session_url)
+                    if detail_resp.ok:
+                        session_info = detail_resp.json()
+                        error_msg = session_info.get("error_message", {})
+                        if isinstance(error_msg, dict):
+                            body = error_msg.get("default_message") or str(error_msg)
+                        elif error_msg:
+                            body = str(error_msg)
+
                 if "certificate" in body.lower() and (
                     "expired" in body.lower() or "not trusted" in body.lower()
                     or "certificate_unknown" in body.lower()
@@ -910,15 +941,20 @@ class VCenterClient:
             print("  Upload completed successfully")
 
         except UntrustedSourceError:
-            # Cancel the session and clean up — source cert is expired/untrusted,
-            # vCenter won't accept the content regardless of what transferred.
+            # Cancel the session and clean up before retrying with forced trust.
             cancel_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=cancel"
             self.rest_session.post(cancel_url)
             try:
                 self.delete_library_item(item_id)
             except Exception:
                 pass
-            raise
+
+            print("  Source TLS certificate not trusted — attempting to add to vCenter trust store and retry...")
+            if not self._trust_source_cert(ovf_url):
+                raise
+
+            # Retry the upload now that the cert is trusted
+            return self.upload_ovf(library_id, source, item_name)
 
         except Exception as e:
             # Cancel the session and clean up the incomplete library item
@@ -1063,6 +1099,31 @@ class VCenterClient:
             else:
                 raise ValueError(f"Unsupported file type: {filename}")
 
+
+    def _trust_source_cert(self, url: str) -> bool:
+        """
+        Add the source server's TLS certificate chain to vCenter's content library
+        trust store so that subsequent PULL transfers from that server are accepted.
+
+        Returns True if the cert was successfully added, False otherwise.
+        """
+        chain_pem = self._get_ssl_chain(url)
+        if not chain_pem:
+            print("  Could not fetch source certificate — cannot force-trust")
+            return False
+
+        trust_url = f"https://{self.host}/api/content/trusted-certificates"
+        response = self.rest_session.post(trust_url, json={"cert_text": chain_pem})
+        if response.ok:
+            print("  Added source certificate to vCenter content library trust store")
+            return True
+        # 400 with "already exists" is fine — cert is already trusted
+        body = response.text
+        if response.status_code == 400 and "already" in body.lower():
+            print("  Source certificate already trusted by vCenter")
+            return True
+        print(f"  Warning: could not add certificate to trust store: {response.status_code} {body}")
+        return False
 
     def _get_ssl_chain(self, url: str) -> Optional[str]:
         """
@@ -1872,12 +1933,31 @@ def _html_escape(text: str) -> str:
             .replace('"', "&quot;"))
 
 
-def write_report(results: list[DeployResult], report_path: str) -> None:
+def _timing_html(start_time: Optional[float], end_time: float) -> str:
+    """Return an HTML snippet with start, end, and elapsed time, or empty string."""
+    if start_time is None:
+        return ""
+    start_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))
+    end_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_time))
+    elapsed = int(end_time - start_time)
+    h, rem = divmod(elapsed, 3600)
+    m, s = divmod(rem, 60)
+    elapsed_str = f"{h}h {m}m {s}s" if h else (f"{m}m {s}s" if m else f"{s}s")
+    return (
+        f" &nbsp;|&nbsp; Start: {start_str}"
+        f" &nbsp;|&nbsp; End: {end_str}"
+        f" &nbsp;|&nbsp; Elapsed: {elapsed_str}"
+    )
+
+
+def write_report(results: list[DeployResult], report_path: str,
+                 start_time: Optional[float] = None) -> None:
     """Write an HTML deployment results report and print a summary to stdout."""
     # Ensure the output path ends in .html
     if not report_path.endswith(".html"):
         report_path = os.path.splitext(report_path)[0] + ".html"
 
+    now = time.time()
     generated = time.strftime("%Y-%m-%d %H:%M:%S")
 
     # --- Build table rows ---
@@ -1954,7 +2034,7 @@ def write_report(results: list[DeployResult], report_path: str) -> None:
 </head>
 <body>
 <h1>OVF Deploy Test Report</h1>
-<div class="meta">Generated: {generated} &nbsp;|&nbsp; Total: {len(results)}</div>
+<div class="meta">Generated: {generated} &nbsp;|&nbsp; Total: {len(results)}{_timing_html(start_time, now)}</div>
 <div class="summary">{"".join(summary_parts)}</div>
 <table>
 <thead>
@@ -2007,6 +2087,10 @@ def vm_name_from_item(item_name: str) -> str:
     # Keep only alphanumeric and dashes, collapse consecutive dashes
     name = re.sub(r'[^a-z0-9-]', '-', name)
     name = re.sub(r'-+', '-', name).strip('-')
+    # If nothing valid remains (e.g. all non-ASCII), use a generic prefix so the
+    # UUID suffix produces a valid K8s name rather than one starting with a dash.
+    if not name:
+        name = "vm"
     # Truncate to 40 chars to leave room for suffix if needed
     return name[:40]
 
@@ -2115,11 +2199,12 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
         results_lock = threading.Lock()
         ssh_lock = threading.Lock()
+        run_start = time.time()
 
         def record(result: DeployResult) -> None:
             with results_lock:
                 results.append(result)
-                write_report(results, report_path)
+                write_report(results, report_path, start_time=run_start)
 
         def deploy_one(entry: OvfEntry) -> None:
             import uuid as _uuid
@@ -2161,8 +2246,6 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
                 try:
                     vc.upload_ovf(library_id, entry.source, item_name)
-                except UntrustedSourceError:
-                    raise
                 except Exception as upload_err:
                     raise SetupError(f"Content library upload failed: {upload_err}") from upload_err
 
@@ -2239,10 +2322,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                             print(f"  Warning: cleanup CL item failed: {e}")
 
             except UntrustedSourceError:
-                print(f"  Skipping: source server TLS certificate is expired or not trusted by vCenter")
+                print(f"  Skipping: source server TLS certificate could not be trusted by vCenter")
                 record(DeployResult(
                     name=entry.name, source=entry.source, vm_name=vm_name,
-                    status="SKIPPED", reason="Source TLS certificate expired or not trusted by vCenter"
+                    status="SKIPPED", reason="Source TLS certificate could not be added to vCenter trust store"
                 ))
 
             except SetupError as e:
@@ -2279,7 +2362,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             for entry in entries:
                 deploy_one(entry)
 
-        write_report(results, report_path)  # final write also prints summary to stdout
+        write_report(results, report_path, start_time=run_start)  # final write also prints summary to stdout
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
 
     except Exception as e:
@@ -2309,11 +2392,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
     report_path = args.report or (os.path.splitext(args.csv)[0] + "-validate.report.html")
     results: list[DeployResult] = []
     results_lock = threading.Lock()
+    run_start = time.time()
 
     def record(result: DeployResult) -> None:
         with results_lock:
             results.append(result)
-            write_report(results, report_path)
+            write_report(results, report_path, start_time=run_start)
 
     vcenter: Optional[VCenterClient] = None
     try:
@@ -2364,7 +2448,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
                         status="SKIPPED",
-                        reason="Source TLS certificate expired or not trusted by vCenter"
+                        reason="Source TLS certificate could not be added to vCenter trust store"
                     ))
                     return
                 except Exception as e:
@@ -2433,7 +2517,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             for entry in entries:
                 validate_one(entry)
 
-        write_report(results, report_path)
+        write_report(results, report_path, start_time=run_start)
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
 
     except Exception as e:
