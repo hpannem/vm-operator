@@ -184,12 +184,12 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 		When("FSS WCP_VMService_FastDeploy is enabled", func() {
 
 			var (
-				err        error
-				cli        imgregv1a1.ContentLibraryItem
-				vmi        vmopv1.VirtualMachineImage
-				vmic       vmopv1.VirtualMachineImageCache
-				vmicm      corev1.ConfigMap
-				createVMIC bool
+				err         error
+				cli         imgregv1a1.ContentLibraryItem
+				vmi1        vmopv1.VirtualMachineImage
+				vmic1       vmopv1.VirtualMachineImageCache
+				vmicm1      corev1.ConfigMap
+				createVMIC1 bool
 			)
 
 			BeforeEach(func() {
@@ -199,7 +199,7 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 
 				cli = imgregv1a1.ContentLibraryItem{
 					Spec: imgregv1a1.ContentLibraryItemSpec{
-						UUID: types.UID(ctx.ContentLibraryItemID),
+						UUID: types.UID(ctx.ContentLibraryItem1ID),
 					},
 					Status: imgregv1a1.ContentLibraryItemStatus{
 						ContentVersion: "v1",
@@ -207,16 +207,16 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 					},
 				}
 
-				vmi = vmopv1.VirtualMachineImage{
+				vmi1 = vmopv1.VirtualMachineImage{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: "my-namespace",
 						Name:      "my-vmi",
 					},
 				}
 
-				createVMIC = true
-				vmicName := util.VMIName(ctx.ContentLibraryItemID)
-				vmic = vmopv1.VirtualMachineImageCache{
+				createVMIC1 = true
+				vmicName := util.VMIName(ctx.ContentLibraryItem1ID)
+				vmic1 = vmopv1.VirtualMachineImageCache{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: pkgcfg.FromContext(ctx).PodNamespace,
 						Name:      vmicName,
@@ -235,26 +235,26 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 					},
 				}
 
-				vmicm = corev1.ConfigMap{
+				vmicm1 = corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: vmic.Namespace,
-						Name:      vmic.Name,
+						Namespace: vmic1.Namespace,
+						Name:      vmic1.Name,
 					},
 					Data: map[string]string{
-						"value": ovfEnvelopeYAML,
+						"value": ovfEnvelope1YAML,
 					},
 				}
-				Expect(ctx.Client.Create(ctx, &vmicm)).To(Succeed())
+				Expect(ctx.Client.Create(ctx, &vmicm1)).To(Succeed())
 			})
 
 			JustBeforeEach(func() {
-				if createVMIC {
-					status := vmic.Status.DeepCopy()
-					Expect(ctx.Client.Create(ctx, &vmic)).To(Succeed())
-					vmic.Status = *status
-					Expect(ctx.Client.Status().Update(ctx, &vmic)).To(Succeed())
+				if createVMIC1 {
+					status := vmic1.Status.DeepCopy()
+					Expect(ctx.Client.Create(ctx, &vmic1)).To(Succeed())
+					vmic1.Status = *status
+					Expect(ctx.Client.Status().Update(ctx, &vmic1)).To(Succeed())
 				}
-				err = vmProvider.SyncVirtualMachineImage(ctx, &cli, &vmi)
+				err = vmProvider.SyncVirtualMachineImage(ctx, &cli, &vmi1)
 			})
 
 			When("it fails to createOrPatch the VMICache resource", func() {
@@ -284,8 +284,8 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 
 			When("OVF condition is False", func() {
 				BeforeEach(func() {
-					vmic.Status.Conditions[0].Status = metav1.ConditionFalse
-					vmic.Status.Conditions[0].Message = "fubar"
+					vmic1.Status.Conditions[0].Status = metav1.ConditionFalse
+					vmic1.Status.Conditions[0].Message = "fubar"
 				})
 				It("should return an error", func() {
 					Expect(err).To(MatchError("failed to get hardware: fubar: cache not ready"))
@@ -295,43 +295,43 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 			When("OVF is not ready", func() {
 				When("condition is missing", func() {
 					BeforeEach(func() {
-						createVMIC = false
+						createVMIC1 = false
 					})
 					It("should return ErrVMICacheNotReady", func() {
-						assertVMICExists(vmic.Namespace, vmic.Name)
-						assertVMICNotReady(err, vmic.Name)
+						assertVMICExists(vmic1.Namespace, vmic1.Name)
+						assertVMICNotReady(err, vmic1.Name)
 					})
 				})
 				When("condition is unknown", func() {
 					BeforeEach(func() {
-						vmic.Status.Conditions[0].Status = metav1.ConditionUnknown
+						vmic1.Status.Conditions[0].Status = metav1.ConditionUnknown
 					})
 					It("should return ErrVMICacheNotReady", func() {
-						assertVMICNotReady(err, vmic.Name)
+						assertVMICNotReady(err, vmic1.Name)
 					})
 				})
 				When("status.ovf is nil", func() {
 					BeforeEach(func() {
-						vmic.Status.OVF = nil
+						vmic1.Status.OVF = nil
 					})
 					It("should return ErrVMICacheNotReady", func() {
-						assertVMICNotReady(err, vmic.Name)
+						assertVMICNotReady(err, vmic1.Name)
 					})
 				})
 				When("status.ovf.providerVersion does not match expected version", func() {
 					BeforeEach(func() {
-						vmic.Status.OVF.ProviderVersion = ""
+						vmic1.Status.OVF.ProviderVersion = ""
 					})
 					It("should return ErrVMICacheNotReady", func() {
-						assertVMICNotReady(err, vmic.Name)
+						assertVMICNotReady(err, vmic1.Name)
 					})
 				})
 				When("configmap is missing", func() {
 					BeforeEach(func() {
-						Expect(ctx.Client.Delete(ctx, &vmicm)).To(Succeed())
+						Expect(ctx.Client.Delete(ctx, &vmicm1)).To(Succeed())
 					})
 					It("should return ErrVMICacheNotReady", func() {
-						assertVMICNotReady(err, vmic.Name)
+						assertVMICNotReady(err, vmic1.Name)
 					})
 				})
 			})
@@ -339,8 +339,8 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 			When("OVF is ready", func() {
 				When("marshaled ovf data is invalid", func() {
 					BeforeEach(func() {
-						vmicm.Data["value"] = "invalid"
-						Expect(ctx.Client.Update(ctx, &vmicm)).To(Succeed())
+						vmicm1.Data["value"] = "invalid"
+						Expect(ctx.Client.Update(ctx, &vmicm1)).To(Succeed())
 					})
 					It("should return an error", func() {
 						Expect(err).To(MatchError("failed to unmarshal ovf yaml into envelope: " +
@@ -351,14 +351,14 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 				When("marshaled ovf data is valid", func() {
 					It("should return success and update VM Image status accordingly", func() {
 						Expect(err).ToNot(HaveOccurred())
-						Expect(vmi.Status.Firmware).To(Equal("efi"))
-						Expect(vmi.Status.HardwareVersion).NotTo(BeNil())
-						Expect(*vmi.Status.HardwareVersion).To(Equal(int32(9)))
-						Expect(vmi.Status.OSInfo.ID).To(Equal("36"))
-						Expect(vmi.Status.OSInfo.Type).To(Equal("otherLinuxGuest"))
-						Expect(vmi.Status.Disks).To(HaveLen(1))
-						Expect(vmi.Status.Disks[0].Limit.String()).To(Equal("30Mi"))
-						Expect(vmi.Status.Disks[0].Requested.String()).To(Equal("18743296"))
+						Expect(vmi1.Status.Firmware).To(Equal("efi"))
+						Expect(vmi1.Status.HardwareVersion).NotTo(BeNil())
+						Expect(*vmi1.Status.HardwareVersion).To(Equal(int32(9)))
+						Expect(vmi1.Status.OSInfo.ID).To(Equal("36"))
+						Expect(vmi1.Status.OSInfo.Type).To(Equal("otherLinuxGuest"))
+						Expect(vmi1.Status.Disks).To(HaveLen(1))
+						Expect(vmi1.Status.Disks[0].Limit.String()).To(Equal("30Mi"))
+						Expect(vmi1.Status.Disks[0].Requested.String()).To(Equal("18743296"))
 					})
 				})
 
@@ -412,7 +412,7 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 				It("should return success and update VM Image status accordingly", func() {
 					cli := &imgregv1a1.ContentLibraryItem{
 						Spec: imgregv1a1.ContentLibraryItemSpec{
-							UUID: types.UID(ctx.ContentLibraryItemID),
+							UUID: types.UID(ctx.ContentLibraryItem1ID),
 						},
 						Status: imgregv1a1.ContentLibraryItemStatus{
 							Type: imgregv1a1.ContentLibraryItemTypeOvf,
@@ -434,8 +434,7 @@ var _ = Describe("SyncVirtualMachineImage", func() {
 	})
 })
 
-const ovfEnvelopeYAML = `
-diskSection:
+const ovfEnvelope1YAML = `diskSection:
   disk:
   - capacity: "30"
     capacityAllocationUnits: byte * 2^20
@@ -450,7 +449,7 @@ networkSection:
   - description: The nat network
     name: nat
 references:
-- href: ttylinux-pc_i486-16.1-disk1.vmdk
+- href: system.vmdk
   id: file1
   size: 10595840
 - href: ttylinux-pc_i486-16.1.nvram
@@ -466,13 +465,27 @@ virtualSystem:
     osType: otherLinuxGuest
   productSection:
   - info: Product info
+    items:
+    - property:
+        default: "false"
+        key: is_replace
+        label: Is Replacement
+        type: boolean
+        userConfigurable: true
+    - property:
+        default: ""
+        key: nsx_hostname
+        label: Hostname
+        type: string
+        userConfigurable: true
     property:
-    - id: is_replace
+    - default: "false"
+      key: is_replace
       label: Is Replacement
       type: boolean
       userConfigurable: true
-      default: "false"
-    - id: nsx_hostname
+    - default: ""
+      key: nsx_hostname
       label: Hostname
       type: string
       userConfigurable: true
@@ -497,13 +510,14 @@ virtualSystem:
       required: false
       value: upgradeAtPowerCycle
     extraConfig:
-    - key: hello
-      required: false
-      value: world
     - key: fu
       required: false
       value: barred
+    - key: hello
+      required: false
+      value: world
     - key: nvram
+      required: false
       value: ovf:/file/file2
     id: null
     info: Virtual hardware requirements
@@ -553,6 +567,256 @@ virtualSystem:
     - automaticAllocation: false
       elementName: vmci
       instanceID: "7"
+      required: false
+      resourceSubType: vmware.vmci
+      resourceType: 1
+    system:
+      elementName: Virtual Hardware Family
+      instanceID: "0"
+      virtualSystemIdentifier: ttylinux-pc_i486-16.1
+      virtualSystemType: vmx-09`
+
+const ovfEnvelope2YAML = `deploymentOptionSection:
+  configuration:
+  - description: 1 CPU, 32 MiB RAM, 2 disks 30 MiB each
+    id: small
+    label: Small
+  - default: true
+    description: 2 CPU, 64 MiB RAM, 2 disks 50 MiB each
+    id: large
+    label: Large
+  info: 'Deployment configurations: small and large'
+diskSection:
+  disk:
+  - capacity: "30"
+    capacityAllocationUnits: byte * 2^20
+    diskId: system_small
+    fileRef: system
+    format: http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized
+    populatedSize: 18743296
+  - capacity: "30"
+    capacityAllocationUnits: byte * 2^20
+    diskId: data_small
+    fileRef: data
+    format: http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized
+    populatedSize: 18743296
+  - capacity: "40"
+    capacityAllocationUnits: byte * 2^20
+    diskId: system_large
+    fileRef: system
+    format: http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized
+    populatedSize: 18743296
+  - capacity: "50"
+    capacityAllocationUnits: byte * 2^20
+    diskId: data_large
+    fileRef: data
+    format: http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized
+    populatedSize: 18743296
+  - capacity: "50"
+    capacityAllocationUnits: byte * 2^20
+    diskId: extra_data_large
+    fileRef: extra_data
+    format: http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized
+    populatedSize: 18743296
+  - capacity: ${scratch_space_size_small}
+    capacityAllocationUnits: byte * 2^20
+    diskId: scratch_small
+  - capacity: ${scratch_space_size_large}
+    capacityAllocationUnits: byte * 2^20
+    diskId: scratch_large
+  info: Virtual disk information
+networkSection:
+  info: The list of logical networks
+  network:
+  - description: The nat network
+    name: nat
+references:
+- href: system.vmdk
+  id: system
+  size: 10595840
+- href: data.vmdk
+  id: data
+  size: 10595840
+- href: extra_data.vmdk
+  id: extra_data
+  size: 10595840
+- href: uber.nvram
+  id: nvram
+  size: 8684
+virtualSystem:
+  id: vm
+  info: A virtual machine
+  name: uber
+  operatingSystemSection:
+    id: 36
+    info: The kind of installed guest operating system
+    osType: otherLinuxGuest
+  productSection:
+  - info: Product info
+    items:
+    - property:
+        configuration: small
+        default: "10"
+        key: scratch_space_size_small
+        type: int
+    - property:
+        configuration: large
+        default: "20"
+        key: scratch_space_size_large
+        type: int
+    property:
+    - configuration: small
+      default: "10"
+      key: scratch_space_size_small
+      type: int
+    - configuration: large
+      default: "20"
+      key: scratch_space_size_large
+      type: int
+  virtualHardwareSection:
+  - config:
+    - key: firmware
+      required: false
+      value: efi
+    - key: powerOpInfo.powerOffType
+      required: false
+      value: soft
+    - key: powerOpInfo.resetType
+      required: false
+      value: soft
+    - key: powerOpInfo.suspendType
+      required: false
+      value: soft
+    - key: tools.syncTimeWithHost
+      required: false
+      value: "true"
+    - key: tools.toolsUpgradePolicy
+      required: false
+      value: upgradeAtPowerCycle
+    extraConfig:
+    - key: fu
+      required: false
+      value: barred
+    - key: hello
+      required: false
+      value: world
+    - key: nvram
+      required: false
+      value: ovf:/file/nvram
+    id: null
+    info: Virtual hardware requirements
+    item:
+    - allocationUnits: hertz * 10^6
+      configuration: small
+      description: Number of Virtual CPUs
+      elementName: 1 virtual CPU(s)
+      instanceID: "1"
+      resourceType: 3
+      virtualQuantity: 1
+    - allocationUnits: byte * 2^20
+      configuration: small
+      description: Memory Size
+      elementName: 32MB of memory
+      instanceID: "2"
+      resourceType: 4
+      virtualQuantity: 32
+    - allocationUnits: hertz * 10^6
+      configuration: large
+      description: Number of Virtual CPUs
+      elementName: 2 virtual CPU(s)
+      instanceID: "1"
+      resourceType: 3
+      virtualQuantity: 2
+    - allocationUnits: byte * 2^20
+      configuration: large
+      description: Memory Size
+      elementName: 64MB of memory
+      instanceID: "2"
+      resourceType: 4
+      virtualQuantity: 64
+    - address: "0"
+      description: SCSI Controller
+      elementName: SCSI Controller 0
+      instanceID: "3"
+      resourceSubType: lsilogic
+      resourceType: 6
+    - addressOnParent: "0"
+      configuration: small
+      elementName: system_small
+      hostResource:
+      - ovf:/disk/system_small
+      instanceID: "4"
+      parent: "3"
+      resourceType: 17
+    - addressOnParent: "1"
+      configuration: small
+      elementName: data_small
+      hostResource:
+      - ovf:/disk/data_small
+      instanceID: "5"
+      parent: "3"
+      resourceType: 17
+    - addressOnParent: "2"
+      configuration: small
+      elementName: scratch_small
+      hostResource:
+      - ovf:/disk/scratch_small
+      instanceID: "6"
+      parent: "3"
+      resourceType: 17
+    - addressOnParent: "0"
+      configuration: large
+      elementName: system_large
+      hostResource:
+      - ovf:/disk/system_large
+      instanceID: "7"
+      parent: "3"
+      resourceType: 17
+    - addressOnParent: "1"
+      configuration: large
+      elementName: data_large
+      hostResource:
+      - ovf:/disk/data_large
+      instanceID: "8"
+      parent: "3"
+      resourceType: 17
+    - addressOnParent: "2"
+      configuration: large
+      elementName: extra_data_large
+      hostResource:
+      - ovf:/disk/extra_data_large
+      instanceID: "9"
+      parent: "3"
+      resourceType: 17
+    - addressOnParent: "3"
+      configuration: large
+      elementName: scratch_large
+      hostResource:
+      - ovf:/disk/scratch_large
+      instanceID: "10"
+      parent: "3"
+      resourceType: 17
+    - addressOnParent: "1"
+      automaticAllocation: true
+      config:
+      - key: wakeOnLanEnabled
+        required: false
+        value: "false"
+      connection:
+      - nat
+      description: E1000 ethernet adapter on "nat"
+      elementName: ethernet0
+      instanceID: "11"
+      resourceSubType: E1000
+      resourceType: 10
+    - automaticAllocation: false
+      elementName: video
+      instanceID: "12"
+      required: false
+      resourceType: 24
+    - automaticAllocation: false
+      elementName: vmci
+      instanceID: "13"
       required: false
       resourceSubType: vmware.vmci
       resourceType: 1

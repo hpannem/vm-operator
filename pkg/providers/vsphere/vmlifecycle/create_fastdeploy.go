@@ -215,6 +215,7 @@ func fastDeploy(
 			diskSpecs = append(diskSpecs, dc)
 		}
 	}
+	logger.Info("Got disk specs", "diskSpecs", diskSpecs)
 
 	// Update the disks with their expected file names.
 	j := 0
@@ -229,11 +230,6 @@ func fastDeploy(
 				// already, otherwise this was a disk entry
 				// from the OVF that was meant to be an empty
 				// disk.
-				if j >= len(dstDiskPaths) {
-					return nil, fmt.Errorf(
-						"invalid disk count: config spec has more file-backed disks (%d) than cached disk paths (%d)",
-						j+1, len(dstDiskPaths))
-				}
 				fb.FileName = dstDiskPaths[j]
 				j++
 			}
@@ -391,14 +387,21 @@ func fastDeployLinked(
 			"extraConfigValue", exConfigKeyVal.Value)
 	}
 
+	logger.Info("Preparing to range over disks",
+		"disks", disks,
+		"len(disks)", len(disks),
+		"diskSpecs", diskSpecs,
+		"len(diskSpecs)", len(diskSpecs))
+
 	j := 0
 	for i := range disks {
+		logger.Info("Ranging over disks", "i", i, "j", j)
 		switch tBack := disks[i].Backing.(type) {
 		case *vimtypes.VirtualDiskFlatVer2BackingInfo:
 			if tBack.FileName != "" {
-				// Linked clones do not fully support encryption, so remove the
-				// possible crypto information from this child disk.
 				if diskSpecs[j].Backing != nil {
+					// Linked clones do not fully support encryption, so remove
+					// the possible crypto information from this child disk.
 					diskSpecs[j].Backing.Crypto = nil
 				}
 
@@ -415,9 +418,9 @@ func fastDeployLinked(
 			}
 		case *vimtypes.VirtualDiskSeSparseBackingInfo:
 			if tBack.FileName != "" {
-				// Linked clones do not fully support encryption, so remove the
-				// possible crypto information from this child disk.
 				if diskSpecs[j].Backing != nil {
+					// Linked clones do not fully support encryption, so remove
+					// the possible crypto information from this child disk.
 					diskSpecs[j].Backing.Crypto = nil
 				}
 
@@ -433,9 +436,9 @@ func fastDeployLinked(
 			}
 		case *vimtypes.VirtualDiskSparseVer2BackingInfo:
 			if tBack.FileName != "" {
-				// Linked clones do not fully support encryption, so remove the
-				// possible crypto information from this child disk.
 				if diskSpecs[j].Backing != nil {
+					// Linked clones do not fully support encryption, so remove
+					// the possible crypto information from this child disk.
 					diskSpecs[j].Backing.Crypto = nil
 				}
 
@@ -468,6 +471,11 @@ func fastDeployDirect(
 	srcDiskPaths []string) (*vimtypes.ManagedObjectReference, error) {
 
 	logger := pkglog.FromContextOrDefault(ctx).WithName("fastDeployDirect")
+
+	for i := range diskSpecs {
+		// In direct mode the files already exist.
+		diskSpecs[i].FileOperation = ""
+	}
 
 	// Copy each disk into the VM directory.
 	if err := fastDeployDirectCopyDisks(
