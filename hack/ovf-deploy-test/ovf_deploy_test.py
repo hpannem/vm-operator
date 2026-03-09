@@ -621,7 +621,11 @@ class VCenterClient:
             print(f"  Warning: could not delete VM {vm_id}: {e}")
 
     def delete_existing_by_name(self, name: str) -> None:
-        """Delete any VM or vApp with the given name (best-effort pre-deploy cleanup)."""
+        """Delete any VM or vApp with the given name (best-effort pre-deploy cleanup).
+
+        Raises RuntimeError if a matching object was found but could not be deleted,
+        so the caller does not proceed to deploy and hit a name collision.
+        """
         from pyVmomi import vim as _vim
         from pyVim.task import WaitForTask
         content = self.si.RetrieveContent()
@@ -635,15 +639,24 @@ class VCenterClient:
                 view.Destroy()
             for obj in matches:
                 print(f"  Pre-deploy cleanup: deleting existing {obj_type.__name__} '{name}' ({obj._moId})")
+                # Power off only if currently running — avoids errors on already-off objects.
                 try:
-                    task = obj.PowerOff(force=True) if isinstance(obj, _vim.VirtualApp) else obj.PowerOff()
-                    WaitForTask(task)
-                except Exception:
-                    pass
+                    if isinstance(obj, _vim.VirtualApp):
+                        if obj.summary.vAppState != "stopped":
+                            WaitForTask(obj.PowerOff(force=True))
+                    else:
+                        if obj.runtime.powerState != _vim.VirtualMachinePowerState.poweredOff:
+                            WaitForTask(obj.PowerOff())
+                except Exception as e:
+                    print(f"  Warning: could not power off '{name}': {e}")
                 try:
                     WaitForTask(obj.Destroy())
+                    print(f"  Pre-deploy cleanup: deleted '{name}'")
                 except Exception as e:
-                    print(f"  Warning: could not delete {obj_type.__name__} '{name}': {e}")
+                    raise RuntimeError(
+                        f"Pre-deploy cleanup: could not delete existing {obj_type.__name__} "
+                        f"'{name}' ({obj._moId}): {e}"
+                    ) from e
 
     def power_on_vapp_by_id(self, vapp_id: str) -> None:
         """Power on a vApp by its MoRef ID using the SOAP API."""
@@ -2429,7 +2442,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
         def validate_one(entry: OvfEntry) -> None:
             import uuid as _uuid
-            vm_name = vm_name_from_item(entry.name) + "-" + _uuid.uuid4().hex[:6]
+            vm_name_base = vm_name_from_item(entry.name)
+            vm_name = vm_name_base + "-" + _uuid.uuid4().hex[:6]
             item_name = entry.name
             print(f"\n[{entry.name}] source={entry.source}")
 
@@ -2468,12 +2482,23 @@ def cmd_validate(args: argparse.Namespace) -> int:
                     return
 
                 vc.delete_existing_by_name(vm_name)
-                resource_id, resource_type = vc.deploy_library_item(
-                    cl_item["id"], vm_name,
-                    target["resource_pool_id"],
-                    target["folder_id"],
-                    target["datastore_id"],
-                )
+                for _deploy_attempt in range(2):
+                    try:
+                        resource_id, resource_type = vc.deploy_library_item(
+                            cl_item["id"], vm_name,
+                            target["resource_pool_id"],
+                            target["folder_id"],
+                            target["datastore_id"],
+                        )
+                        break
+                    except RuntimeError as _deploy_err:
+                        if "already exists" in str(_deploy_err) and _deploy_attempt == 0:
+                            import uuid as _uuid
+                            vm_name = vm_name_base + "-" + _uuid.uuid4().hex[:6]
+                            print(f"  Name collision on deploy, retrying with new name: {vm_name}")
+                            vc.delete_existing_by_name(vm_name)
+                        else:
+                            raise
 
                 if resource_type == "VirtualApp":
                     vc.power_on_vapp_by_id(resource_id)
