@@ -2195,8 +2195,33 @@ def cmd_discover(args: argparse.Namespace) -> int:
 
 
 
+_TRANSIENT_UPLOAD_ERRORS = (
+    "503",
+    "service unavailable",
+    "read timed out",
+    "timed out",
+    "connection reset",
+    "504",
+    "gateway timeout",
+    "connectionerror",
+    "connection aborted",
+)
+
+
+def _is_transient_upload_error(reason: str) -> bool:
+    """Return True if the upload failure reason looks like a transient infrastructure error."""
+    lower = reason.lower()
+    return any(pat in lower for pat in _TRANSIENT_UPLOAD_ERRORS)
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
-    """Upload OVFs to a content library without deploying them."""
+    """Upload OVFs to a content library without deploying them.
+
+    Maintains a state file (<csv>.setup-state.json) so re-runs skip OVFs that
+    previously failed with a permanent error (bad OVF, bad checksum, etc.) and
+    only retry transient failures (503, timeout, connection reset, etc.).
+    Delete the state file to force a full re-run.
+    """
     entries = load_ovf_list(args.csv)
     if not entries:
         print(f"ERROR: No valid entries found in {args.csv}")
@@ -2223,18 +2248,51 @@ def cmd_setup(args: argparse.Namespace) -> int:
         traceback.print_exc()
         return 1
 
+    # State file: maps entry name -> {"status": ..., "reason": ..., "transient": bool}
+    state_path = os.path.splitext(args.csv)[0] + ".setup-state.json"
+    state: dict = {}
+    if os.path.exists(state_path):
+        try:
+            with open(state_path) as f:
+                state = json.load(f)
+            print(f"Loaded setup state from {state_path} ({len(state)} entries)")
+        except Exception as e:
+            print(f"Warning: could not read state file {state_path}: {e} — starting fresh")
+            state = {}
+
     results: list[DeployResult] = []
     report_path = args.report or (os.path.splitext(args.csv)[0] + ".with-cl-setup.report.html")
     results_lock = threading.Lock()
     run_start = time.time()
 
-    def record(result: DeployResult) -> None:
+    def record(result: DeployResult, transient: bool = False) -> None:
         with results_lock:
             results.append(result)
+            state[result.name] = {
+                "status": result.status,
+                "reason": result.reason,
+                "transient": transient,
+            }
+            try:
+                with open(state_path, "w") as f:
+                    json.dump(state, f, indent=2)
+            except Exception as e:
+                print(f"  Warning: could not write state file: {e}")
             write_report(results, report_path, start_time=run_start,
                          title="OVF Content Library Setup")
 
     def setup_one(entry: OvfEntry) -> None:
+        # Skip if previously failed with a permanent (non-transient) error.
+        prev = state.get(entry.name)
+        if prev and prev.get("status") == "SETUP_FAILED" and not prev.get("transient"):
+            print(f"\n[{entry.name}] Skipping — permanent failure from previous run: {prev.get('reason', '')[:100]}")
+            record(DeployResult(
+                name=entry.name, source=entry.source, vm_name="",
+                status="SETUP_FAILED",
+                reason=f"[Permanent, not retried] {prev.get('reason', '')}"
+            ))
+            return
+
         print(f"\n{'=' * 60}")
         print(f"Setup: {entry.name}  ({entry.source})")
         print(f"{'=' * 60}")
@@ -2251,7 +2309,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 print(f"  Already in content library, skipping upload")
                 record(DeployResult(
                     name=entry.name, source=entry.source, vm_name="",
-                    status="SKIPPED", reason="Already present in content library"
+                    status="SUCCESS", reason="Already present in content library"
                 ))
                 return
 
@@ -2265,10 +2323,13 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 ))
                 return
             except Exception as e:
+                reason = str(e)
+                transient = _is_transient_upload_error(reason)
+                print(f"  Upload failed ({'transient' if transient else 'permanent'}): {reason[:120]}")
                 record(DeployResult(
                     name=entry.name, source=entry.source, vm_name="",
-                    status="SETUP_FAILED", reason=f"Upload failed: {e}"
-                ))
+                    status="SETUP_FAILED", reason=f"Upload failed: {reason}"
+                ), transient=transient)
                 return
 
             record(DeployResult(
@@ -2279,10 +2340,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
         except Exception as e:
             import traceback
             traceback.print_exc()
+            reason = str(e)
             record(DeployResult(
                 name=entry.name, source=entry.source, vm_name="",
-                status="SETUP_FAILED", reason=str(e)
-            ))
+                status="SETUP_FAILED", reason=reason
+            ), transient=_is_transient_upload_error(reason))
         finally:
             vc.disconnect()
 
@@ -2296,6 +2358,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     write_report(results, report_path, start_time=run_start,
                  title="OVF Content Library Setup")
+
+    transient_failures = [r for r in results if r.status == "SETUP_FAILED"
+                          and state.get(r.name, {}).get("transient")]
+    permanent_failures = [r for r in results if r.status == "SETUP_FAILED"
+                          and not state.get(r.name, {}).get("transient")]
+    if transient_failures:
+        print(f"\n{len(transient_failures)} transient failure(s) — re-run setup to retry")
+    if permanent_failures:
+        print(f"{len(permanent_failures)} permanent failure(s) — will not be retried (delete {state_path} to force)")
     return 1 if any(r.status == "SETUP_FAILED" for r in results) else 0
 
 
@@ -2394,10 +2465,22 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 if entry.config_file:
                     vapp_config = load_vapp_config(entry.config_file)
 
-                try:
-                    vc.upload_ovf(library_id, entry.source, item_name)
-                except Exception as upload_err:
-                    raise SetupError(f"Content library upload failed: {upload_err}") from upload_err
+                if args.cleanup:
+                    # Self-contained mode: upload inline, delete CL item after test.
+                    try:
+                        vc.upload_ovf(library_id, entry.source, item_name)
+                    except Exception as upload_err:
+                        raise SetupError(f"Content library upload failed: {upload_err}") from upload_err
+                else:
+                    # Pre-populated mode: CL must already contain the item (run setup first).
+                    cl_check = vc.find_library_item(library_id, item_name)
+                    if not cl_check:
+                        record(DeployResult(
+                            name=entry.name, source=entry.source, vm_name=vm_name,
+                            status="SKIPPED",
+                            reason="Not in content library — run 'setup' first"
+                        ))
+                        return
 
                 vmi_name, vmi_error, failed_vmi_name = sv.wait_for_vmi(args.namespace, item_name)
                 if not vmi_name:
@@ -2457,19 +2540,21 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                         vmop_logs=logs
                     ))
 
-                if args.cleanup:
+                # Always delete the VM after the test.
+                try:
+                    sv.delete_vm(args.namespace, vm_name)
+                except Exception as e:
+                    print(f"  Warning: VM deletion failed: {e}")
+
+                # In --cleanup mode, also delete the CL item (inline upload).
+                if args.cleanup and not args.no_cleanup_cl:
                     try:
-                        sv.delete_vm(args.namespace, vm_name)
+                        cl_item = vc.find_library_item(library_id, item_name)
+                        if cl_item:
+                            vc.delete_library_item(cl_item["id"])
+                            print(f"  Deleted content library item '{item_name}'")
                     except Exception as e:
-                        print(f"  Warning: cleanup VM failed: {e}")
-                    if not args.no_cleanup_cl:
-                        try:
-                            cl_item = vc.find_library_item(library_id, item_name)
-                            if cl_item:
-                                vc.delete_library_item(cl_item["id"])
-                                print(f"  Deleted content library item '{item_name}'")
-                        except Exception as e:
-                            print(f"  Warning: cleanup CL item failed: {e}")
+                        print(f"  Warning: CL item deletion failed: {e}")
 
             except UntrustedSourceError:
                 print(f"  Skipping: source server TLS certificate could not be trusted by vCenter")
