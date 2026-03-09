@@ -2013,7 +2013,8 @@ def _timing_html(start_time: Optional[float], end_time: float) -> str:
 
 
 def write_report(results: list[DeployResult], report_path: str,
-                 start_time: Optional[float] = None) -> None:
+                 start_time: Optional[float] = None,
+                 title: str = "OVF Deploy Test Report") -> None:
     """Write an HTML deployment results report and print a summary to stdout."""
     # Ensure the output path ends in .html
     if not report_path.endswith(".html"):
@@ -2077,7 +2078,7 @@ def write_report(results: list[DeployResult], report_path: str,
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OVF Deploy Report — {generated}</title>
+<title>{title} — {generated}</title>
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          margin: 32px; color: #24292f; background: #fff; }}
@@ -2095,7 +2096,7 @@ def write_report(results: list[DeployResult], report_path: str,
 </style>
 </head>
 <body>
-<h1>OVF Deploy Test Report</h1>
+<h1>{title}</h1>
 <div class="meta">Generated: {generated} &nbsp;|&nbsp; Total: {len(results)}{_timing_html(start_time, now)}</div>
 <div class="summary">{"".join(summary_parts)}</div>
 <table>
@@ -2120,7 +2121,7 @@ def write_report(results: list[DeployResult], report_path: str,
 
     # Print a plain-text summary to stdout
     print(f"\n{'='*60}")
-    print(f"OVF Deploy Report — {generated}")
+    print(f"{title} — {generated}")
     print(f"{'='*60}")
     col = max((len(r.name) for r in results), default=10)
     for r in results:
@@ -2194,6 +2195,110 @@ def cmd_discover(args: argparse.Namespace) -> int:
 
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Upload OVFs to a content library without deploying them."""
+    entries = load_ovf_list(args.csv)
+    if not entries:
+        print(f"ERROR: No valid entries found in {args.csv}")
+        return 1
+
+    try:
+        vcenter = VCenterClient(
+            args.vcenter, args.vcenter_user,
+            args.vcenter_password, args.vcenter_root_password,
+        )
+        vcenter.connect()
+
+        library_id = vcenter.find_content_library(args.content_library)
+        if not library_id:
+            print(f"ERROR: Content library '{args.content_library}' not found in vCenter")
+            vcenter.disconnect()
+            return 1
+
+        vcenter.disconnect()
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    results: list[DeployResult] = []
+    report_path = args.report or (os.path.splitext(args.csv)[0] + ".with-cl-setup.report.html")
+    results_lock = threading.Lock()
+    run_start = time.time()
+
+    def record(result: DeployResult) -> None:
+        with results_lock:
+            results.append(result)
+            write_report(results, report_path, start_time=run_start,
+                         title="OVF Content Library Setup")
+
+    def setup_one(entry: OvfEntry) -> None:
+        print(f"\n{'=' * 60}")
+        print(f"Setup: {entry.name}  ({entry.source})")
+        print(f"{'=' * 60}")
+
+        vc = VCenterClient(
+            args.vcenter, args.vcenter_user,
+            args.vcenter_password, args.vcenter_root_password,
+        )
+        try:
+            vc.connect(ssh=False)
+
+            existing = vc.find_library_item(library_id, entry.name)
+            if existing:
+                print(f"  Already in content library, skipping upload")
+                record(DeployResult(
+                    name=entry.name, source=entry.source, vm_name="",
+                    status="SKIPPED", reason="Already present in content library"
+                ))
+                return
+
+            try:
+                vc.upload_ovf(library_id, entry.source, entry.name)
+            except UntrustedSourceError:
+                record(DeployResult(
+                    name=entry.name, source=entry.source, vm_name="",
+                    status="SKIPPED",
+                    reason="Source TLS certificate could not be added to vCenter trust store"
+                ))
+                return
+            except Exception as e:
+                record(DeployResult(
+                    name=entry.name, source=entry.source, vm_name="",
+                    status="SETUP_FAILED", reason=f"Upload failed: {e}"
+                ))
+                return
+
+            record(DeployResult(
+                name=entry.name, source=entry.source, vm_name="",
+                status="SUCCESS", reason="Uploaded to content library"
+            ))
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            record(DeployResult(
+                name=entry.name, source=entry.source, vm_name="",
+                status="SETUP_FAILED", reason=str(e)
+            ))
+        finally:
+            vc.disconnect()
+
+    workers = getattr(args, "parallel", 1)
+    if workers > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(setup_one, entries))
+    else:
+        for entry in entries:
+            setup_one(entry)
+
+    write_report(results, report_path, start_time=run_start,
+                 title="OVF Content Library Setup")
+    return 1 if any(r.status == "SETUP_FAILED" for r in results) else 0
+
+
 def cmd_deploy(args: argparse.Namespace) -> int:
     """Deploy OVFs listed in a CSV file via VM Service."""
     entries = load_ovf_list(args.csv)
@@ -2240,14 +2345,15 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         vcenter = None
 
         results: list[DeployResult] = []
-        report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
+        report_path = args.report or (os.path.splitext(args.csv)[0] + ".with-vmop.report.html")
         results_lock = threading.Lock()
         run_start = time.time()
 
         def record(result: DeployResult) -> None:
             with results_lock:
                 results.append(result)
-                write_report(results, report_path, start_time=run_start)
+                write_report(results, report_path, start_time=run_start,
+                             title="OVF Deploy with VM Service")
 
         def deploy_one(entry: OvfEntry) -> None:
             import uuid as _uuid
@@ -2407,7 +2513,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             for entry in entries:
                 deploy_one(entry)
 
-        write_report(results, report_path, start_time=run_start)  # final write also prints summary to stdout
+        write_report(results, report_path, start_time=run_start,
+                     title="OVF Deploy with VM Service")  # final write also prints summary to stdout
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
 
     except Exception as e:
@@ -2434,7 +2541,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"ERROR: No valid entries found in {args.csv}")
         return 1
 
-    report_path = args.report or (os.path.splitext(args.csv)[0] + "-validate.report.html")
+    report_path = args.report or (os.path.splitext(args.csv)[0] + ".with-cl.report.html")
     results: list[DeployResult] = []
     results_lock = threading.Lock()
     run_start = time.time()
@@ -2442,7 +2549,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
     def record(result: DeployResult) -> None:
         with results_lock:
             results.append(result)
-            write_report(results, report_path, start_time=run_start)
+            write_report(results, report_path, start_time=run_start,
+                         title="OVF Deploy with Content Library")
 
     vcenter: Optional[VCenterClient] = None
     try:
@@ -2572,7 +2680,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
             for entry in entries:
                 validate_one(entry)
 
-        write_report(results, report_path, start_time=run_start)
+        write_report(results, report_path, start_time=run_start,
+                     title="OVF Deploy with Content Library")
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
 
     except Exception as e:
@@ -2666,7 +2775,34 @@ def main() -> int:
     )
     p_deploy.add_argument(
         "--report",
-        help="Path to write the results report (default: <csv>.report.html)"
+        help="Path to write the results report (default: <csv>.with-vmop.report.html)"
+    )
+
+    # --- setup subcommand ---
+    p_setup = sub.add_parser(
+        "setup",
+        help="Upload OVFs to a content library (run before deploy/validate to isolate upload failures)"
+    )
+    p_setup.add_argument(
+        "csv",
+        help="CSV file with OVFs to upload (name,source[,config_file])"
+    )
+    _add_vcenter_args(p_setup)
+    p_setup.add_argument(
+        "--content-library",
+        default=DEFAULT_CONTENT_LIBRARY,
+        help=f"Content library name (default: {DEFAULT_CONTENT_LIBRARY})"
+    )
+    p_setup.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of OVFs to upload concurrently (default: 1)"
+    )
+    p_setup.add_argument(
+        "--report",
+        help="Path to write the results report (default: <csv>.with-cl-setup.report.html)"
     )
 
     # --- validate subcommand ---
@@ -2713,13 +2849,15 @@ def main() -> int:
     )
     p_validate.add_argument(
         "--report",
-        help="Path to write the results report (default: <csv>-validate.report.html)"
+        help="Path to write the results report (default: <csv>.with-cl.report.html)"
     )
 
     args = parser.parse_args()
 
     if args.command == "discover":
         return cmd_discover(args)
+    elif args.command == "setup":
+        return cmd_setup(args)
     elif args.command == "validate":
         return cmd_validate(args)
     else:
