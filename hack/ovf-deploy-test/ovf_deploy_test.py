@@ -852,24 +852,28 @@ class VCenterClient:
         Find a library item by name in a library.
         Returns a dict with 'id' and 'size' keys, or None if not found.
         """
-        url = f"https://{self.host}/api/content/library/item"
-        params = {"library_id": library_id}
-        response = self.rest_session.get(url, params=params)
+        # Use the find action with POST body for efficient server-side filtering
+        find_url = f"https://{self.host}/api/content/library/item?action=find"
+        find_spec = {
+            "name": item_name,
+            "library_id": library_id,
+        }
+        response = self.rest_session.post(find_url, json=find_spec)
         response.raise_for_status()
 
         item_ids = response.json()
-        for item_id in item_ids:
-            item_url = f"https://{self.host}/api/content/library/item/{item_id}"
-            item_response = self.rest_session.get(item_url)
-            if item_response.status_code == 404:
-                # Item was deleted between the list and the fetch — skip it.
-                continue
-            item_response.raise_for_status()
-            item_info = item_response.json()
-            if item_info.get("name") == item_name:
-                return {"id": item_id, "size": item_info.get("size", 0)}
+        if not item_ids:
+            return None
 
-        return None
+        # Fetch details for the first matching item to get size
+        item_id = item_ids[0]
+        item_url = f"https://{self.host}/api/content/library/item/{item_id}"
+        item_response = self.rest_session.get(item_url)
+        if item_response.status_code == 404:
+            return None
+        item_response.raise_for_status()
+        item_info = item_response.json()
+        return {"id": item_id, "size": item_info.get("size", 0)}
 
     def delete_library_item(self, item_id: str) -> None:
         """Delete a content library item by ID."""
@@ -881,6 +885,54 @@ class VCenterClient:
                 f"{response.status_code} {response.reason}\n{response.text}"
             )
         print(f"  Deleted incomplete library item {item_id}")
+
+    def cancel_stale_sessions(self, library_id: str) -> None:
+        """
+        Cancel any ACTIVE update sessions for items in the given library.
+
+        Stale sessions from previous crashed/timed-out runs hold vpxd resources
+        and cause 503 errors on subsequent item creation requests. Call this
+        once at startup before beginning uploads.
+        """
+        list_url = f"https://{self.host}/api/content/library/item/update-session"
+        response = self.rest_session.get(list_url, timeout=30)
+        if not response.ok:
+            print(f"  Warning: could not list update sessions: {response.status_code} {response.text[:100]}")
+            return
+
+        session_ids = response.json()
+        if not session_ids:
+            return
+
+        cancelled = 0
+        for sid in session_ids:
+            # Fetch session details to check library and state
+            detail_url = f"https://{self.host}/api/content/library/item/update-session/{sid}"
+            detail = self.rest_session.get(detail_url, timeout=30)
+            if not detail.ok:
+                continue
+            info = detail.json()
+            if info.get("state") != "ACTIVE":
+                continue
+            # Only cancel sessions belonging to our library
+            item_id = info.get("library_item_id", "")
+            item_url = f"https://{self.host}/api/content/library/item/{item_id}"
+            item_resp = self.rest_session.get(item_url, timeout=30)
+            if not item_resp.ok:
+                continue
+            if item_resp.json().get("library_id") != library_id:
+                continue
+            cancel_url = f"https://{self.host}/api/content/library/item/update-session/{sid}?action=cancel"
+            cancel_resp = self.rest_session.post(cancel_url, timeout=30)
+            if cancel_resp.ok:
+                print(f"  Cancelled stale update session {sid}")
+                cancelled += 1
+            else:
+                print(f"  Warning: could not cancel session {sid}: {cancel_resp.status_code}")
+
+        if cancelled:
+            print(f"  Cancelled {cancelled} stale session(s) — waiting 5s for vpxd to clean up...")
+            time.sleep(5)
 
     def upload_ovf(self, library_id: str, source: str, item_name: str) -> str:
         """
@@ -990,7 +1042,7 @@ class VCenterClient:
         except UntrustedSourceError:
             # Cancel the session and clean up before retrying with forced trust.
             cancel_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=cancel"
-            self.rest_session.post(cancel_url)
+            self.rest_session.post(cancel_url, timeout=30)
             try:
                 self.delete_library_item(item_id)
             except Exception:
@@ -1006,7 +1058,9 @@ class VCenterClient:
         except Exception as e:
             # Cancel the session and clean up the incomplete library item
             cancel_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=cancel"
-            self.rest_session.post(cancel_url)
+            cancel_resp = self.rest_session.post(cancel_url, timeout=30)
+            if not cancel_resp.ok:
+                print(f"  Warning: could not cancel session {session_id}: {cancel_resp.status_code}")
             try:
                 self.delete_library_item(item_id)
             except Exception:
@@ -1016,7 +1070,7 @@ class VCenterClient:
         return item_id
 
     def _wait_for_session_files_ready(self, session_id: str,
-                                      timeout: int = 3600, poll_interval: int = 10) -> int:
+                                      timeout: int = 600, poll_interval: int = 10) -> int:
         """
         Poll the update session file list until every file is READY.
         Returns the total bytes of all transferred files.
@@ -2227,27 +2281,6 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"ERROR: No valid entries found in {args.csv}")
         return 1
 
-    try:
-        vcenter = VCenterClient(
-            args.vcenter, args.vcenter_user,
-            args.vcenter_password, args.vcenter_root_password,
-        )
-        vcenter.connect()
-
-        library_id = vcenter.find_content_library(args.content_library)
-        if not library_id:
-            print(f"ERROR: Content library '{args.content_library}' not found in vCenter")
-            vcenter.disconnect()
-            return 1
-
-        vcenter.disconnect()
-
-    except Exception as e:
-        print(f"ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-
     # State file: maps entry name -> {"status": ..., "reason": ..., "transient": bool}
     # Include vCenter IP and library name in the state file name so different
     # environments never share state.
@@ -2265,10 +2298,31 @@ def cmd_setup(args: argparse.Namespace) -> int:
             state = {}
 
     results: list[DeployResult] = []
-    safe_vc = args.vcenter.replace(":", "_").replace("/", "_")
     report_path = args.report or (os.path.splitext(args.csv)[0] + f".{safe_vc}.with-cl-setup.report.html")
     results_lock = threading.Lock()
     run_start = time.time()
+
+    # Create a single shared vCenter connection for the entire run
+    vcenter = VCenterClient(
+        args.vcenter, args.vcenter_user,
+        args.vcenter_password, args.vcenter_root_password,
+    )
+    try:
+        vcenter.connect()
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    library_id = vcenter.find_content_library(args.content_library)
+    if not library_id:
+        print(f"ERROR: Content library '{args.content_library}' not found in vCenter")
+        vcenter.disconnect()
+        return 1
+
+    print("Checking for stale update sessions from previous runs...")
+    vcenter.cancel_stale_sessions(library_id)
 
     def record(result: DeployResult, transient: bool = False) -> None:
         with results_lock:
@@ -2286,7 +2340,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
             write_report(results, report_path, start_time=run_start,
                          title="OVF Content Library Setup")
 
-    def setup_one(entry: OvfEntry) -> None:
+    def setup_one(entry: OvfEntry, vc: VCenterClient) -> None:
+        """Process a single OVF entry using the provided vCenter client."""
         # Skip if previously failed with a permanent (non-transient) error.
         prev = state.get(entry.name)
         if prev and prev.get("status") == "SETUP_FAILED" and not prev.get("transient"):
@@ -2302,13 +2357,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"Setup: {entry.name}  ({entry.source})")
         print(f"{'=' * 60}")
 
-        vc = VCenterClient(
-            args.vcenter, args.vcenter_user,
-            args.vcenter_password, args.vcenter_root_password,
-        )
         try:
-            vc.connect(ssh=False)
-
             existing = vc.find_library_item(library_id, entry.name)
             if existing:
                 print(f"  Already in content library, skipping upload")
@@ -2350,16 +2399,29 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 name=entry.name, source=entry.source, vm_name="",
                 status="SETUP_FAILED", reason=reason
             ), transient=_is_transient_upload_error(reason))
+
+    def setup_one_parallel(entry: OvfEntry) -> None:
+        """Wrapper for parallel execution — creates its own vCenter client."""
+        vc = VCenterClient(
+            args.vcenter, args.vcenter_user,
+            args.vcenter_password, args.vcenter_root_password,
+        )
+        try:
+            vc.connect(ssh=False)
+            setup_one(entry, vc)
         finally:
             vc.disconnect()
 
     workers = getattr(args, "parallel", 1)
     if workers > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(setup_one, entries))
+            list(pool.map(setup_one_parallel, entries))
     else:
+        # Sequential mode: reuse the shared vcenter connection
         for entry in entries:
-            setup_one(entry)
+            setup_one(entry, vcenter)
+
+    vcenter.disconnect()
 
     write_report(results, report_path, start_time=run_start,
                  title="OVF Content Library Setup")
