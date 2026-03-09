@@ -521,6 +521,27 @@ class VCenterClient:
                     additional_parameters.append(ip_param)
                     print("  Overriding IP allocation policy to DHCP")
 
+            elif param.get("type") == "PropertyParams":
+                # Auto-fill OVF properties so vCenter can power on the VM.
+                # Properties that are left empty for mandatory fields cause a
+                # power-on failure ("Property X must be configured").
+                props = param.get("properties", [])
+                if props:
+                    filled = []
+                    for p in props:
+                        ovf_prop = OvfProperty(
+                            key=p.get("id", ""),
+                            type=p.get("type", "string"),
+                            default=p.get("value", ""),
+                            user_configurable=not p.get("ui_optional", True),
+                            label=p.get("label", ""),
+                            description=p.get("description", ""),
+                        )
+                        value = _smart_value_for_property(ovf_prop)
+                        filled.append(dict(p, value=value))
+                    additional_parameters.append({"type": "PropertyParams", "properties": filled})
+                    print(f"  Auto-filled {len(filled)} OVF property/properties for deploy")
+
         url = f"https://{self.host}/api/vcenter/ovf/library-item/{item_id}?action=deploy"
         deployment_spec: dict = {
             "name": vm_name,
@@ -583,11 +604,24 @@ class VCenterClient:
         """Power on a VM by its vSphere VM ID."""
         url = f"https://{self.host}/api/vcenter/vm/{vm_id}/power?action=start"
         response = self.rest_session.post(url)
-        if not response.ok and response.status_code != 400:
-            # 400 may mean already powered on
+        if not response.ok:
+            # 400 means already powered on — not an error.
+            if response.status_code == 400:
+                return
+            # Extract the most useful message from the JSON error body.
+            reason = response.text
+            try:
+                err = response.json()
+                msgs = [m.get("default_message", "")
+                        for m in err.get("messages", [])
+                        if m.get("default_message")]
+                if msgs:
+                    reason = " ".join(msgs)
+            except Exception:
+                pass
             raise RuntimeError(
                 f"Failed to power on VM {vm_id}: "
-                f"{response.status_code} {response.reason}\n{response.text}"
+                f"{response.status_code} {response.reason} {reason}"
             )
 
     def wait_for_vm_powered_on_by_id(self, vm_id: str,
@@ -1497,13 +1531,22 @@ class SupervisorClient:
         print(f"Creating VirtualMachine {vm_name}...")
         print(f"  Spec:\n{yaml_content}")
 
-        # Apply via kubectl
+        # Apply via kubectl with reconnect on SSH failure
         cmd = f"cat <<'VMEOF' | kubectl apply -f -\n{yaml_content}\nVMEOF"
-        stdin, stdout, stderr = self.ssh.exec_command(cmd)
-        exit_code = stdout.channel.recv_exit_status()
-
+        for attempt in range(2):
+            try:
+                stdin, stdout, stderr = self.ssh.exec_command(cmd)
+                exit_code = stdout.channel.recv_exit_status()
+                stderr_str = stderr.read().decode()
+                break
+            except (paramiko.SSHException, EOFError, OSError) as e:
+                if attempt == 0:
+                    print(f"  SSH connection lost ({e}), reconnecting...")
+                    self._open_ssh()
+                else:
+                    raise RuntimeError(f"SSH connection failed after reconnect: {e}") from e
         if exit_code != 0:
-            raise RuntimeError(f"Failed to create VM: {stderr.read().decode()}")
+            raise RuntimeError(f"Failed to create VM: {stderr_str}")
 
         print(f"  VirtualMachine {vm_name} created")
 
@@ -2437,8 +2480,6 @@ def cmd_validate(args: argparse.Namespace) -> int:
         # Setup connection no longer needed — each worker creates its own
         vcenter.disconnect()
         vcenter = None
-
-        results_lock = threading.Lock()
 
         def validate_one(entry: OvfEntry) -> None:
             import uuid as _uuid
