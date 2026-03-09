@@ -2553,11 +2553,6 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         libraries = supervisor.list_content_libraries(args.namespace)
         print(f"Content libraries in namespace: {libraries}")
 
-        supervisor.disconnect()
-        supervisor = None
-        vcenter.disconnect()
-        vcenter = None
-
         results: list[DeployResult] = []
         _safe_vc = args.vcenter.replace(":", "_").replace("/", "_")
         report_path = args.report or (os.path.splitext(args.csv)[0] + f".{_safe_vc}.with-vmop.report.html")
@@ -2570,7 +2565,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 write_report(results, report_path, start_time=run_start,
                              title="OVF Deploy with VM Service")
 
-        def deploy_one(entry: OvfEntry) -> None:
+        def deploy_one(entry: OvfEntry, vc: VCenterClient, sv: SupervisorClient) -> None:
+            """Process a single OVF entry using the provided clients."""
             import uuid as _uuid
             vm_name = vm_name_from_item(entry.name) + "-" + _uuid.uuid4().hex[:6]
             item_name = entry.name
@@ -2578,15 +2574,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             print(f"Deploying: {entry.name}  ({entry.source})")
             print(f"{'=' * 60}")
 
-            vc = VCenterClient(
-                args.vcenter, args.vcenter_user,
-                args.vcenter_password, args.vcenter_root_password
-            )
-            sv = SupervisorClient(supervisor_ip, supervisor_password)
             try:
-                vc.connect()
-                sv.connect()
-
                 print(f"  Item name: '{item_name}' -> VM name: '{vm_name}'")
                 print("  Parsing OVF descriptor...")
                 ovf_info = fetch_ovf_info(entry.source)
@@ -2731,6 +2719,17 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     status="FAILED", reason=reason, vmop_logs=logs
                 ))
 
+        def deploy_one_parallel(entry: OvfEntry) -> None:
+            """Wrapper for parallel execution — creates its own clients."""
+            vc = VCenterClient(
+                args.vcenter, args.vcenter_user,
+                args.vcenter_password, args.vcenter_root_password
+            )
+            sv = SupervisorClient(supervisor_ip, supervisor_password)
+            try:
+                vc.connect()
+                sv.connect()
+                deploy_one(entry, vc, sv)
             finally:
                 vc.disconnect()
                 sv.disconnect()
@@ -2738,10 +2737,11 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         workers = getattr(args, "parallel", 1)
         if workers > 1:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                list(pool.map(deploy_one, entries))
+                list(pool.map(deploy_one_parallel, entries))
         else:
+            # Sequential mode: reuse the shared connections
             for entry in entries:
-                deploy_one(entry)
+                deploy_one(entry, vcenter, supervisor)
 
         write_report(results, report_path, start_time=run_start,
                      title="OVF Deploy with VM Service")  # final write also prints summary to stdout
@@ -2805,26 +2805,17 @@ def cmd_validate(args: argparse.Namespace) -> int:
             resource_pool=args.resource_pool,
         )
 
-        # Setup connection no longer needed — each worker creates its own
-        vcenter.disconnect()
-        vcenter = None
-
-        def validate_one(entry: OvfEntry) -> None:
+        def validate_one(entry: OvfEntry, vc: VCenterClient) -> None:
+            """Process a single OVF entry using the provided vCenter client."""
             import uuid as _uuid
             vm_name_base = vm_name_from_item(entry.name)
             vm_name = vm_name_base + "-" + _uuid.uuid4().hex[:6]
             item_name = entry.name
             print(f"\n[{entry.name}] source={entry.source}")
 
-            vc = VCenterClient(
-                args.vcenter, args.vcenter_user,
-                args.vcenter_password, args.vcenter_root_password,
-            )
             resource_id: Optional[str] = None
             resource_type: str = "VirtualMachine"
             try:
-                vc.connect(ssh=False)
-
                 try:
                     vc.upload_ovf(library_id, entry.source, item_name)
                 except UntrustedSourceError:
@@ -2901,15 +2892,27 @@ def cmd_validate(args: argparse.Namespace) -> int:
                         vc.delete_vapp_by_id(resource_id)
                     else:
                         vc.delete_vm_by_id(resource_id)
+
+        def validate_one_parallel(entry: OvfEntry) -> None:
+            """Wrapper for parallel execution — creates its own vCenter client."""
+            vc = VCenterClient(
+                args.vcenter, args.vcenter_user,
+                args.vcenter_password, args.vcenter_root_password,
+            )
+            try:
+                vc.connect(ssh=False)
+                validate_one(entry, vc)
+            finally:
                 vc.disconnect()
 
         workers = getattr(args, "parallel", 1)
         if workers > 1:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                list(pool.map(validate_one, entries))
+                list(pool.map(validate_one_parallel, entries))
         else:
+            # Sequential mode: reuse the shared vcenter connection
             for entry in entries:
-                validate_one(entry)
+                validate_one(entry, vcenter)
 
         write_report(results, report_path, start_time=run_start,
                      title="OVF Deploy with Content Library")
