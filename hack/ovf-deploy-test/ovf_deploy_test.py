@@ -2193,26 +2193,6 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
-class _LockedSupervisorClient:
-    """Thread-safe proxy around a shared SupervisorClient.
-
-    Serialises all SSH calls through a lock so parallel deploy workers
-    share one SSH connection without racing each other.
-    """
-
-    def __init__(self, client: "SupervisorClient", lock: threading.Lock) -> None:
-        self._client = client
-        self._lock = lock
-
-    def __getattr__(self, name: str):
-        attr = getattr(self._client, name)
-        if callable(attr):
-            def _locked(*args, **kwargs):
-                with self._lock:
-                    return attr(*args, **kwargs)
-            return _locked
-        return attr
-
 
 def cmd_deploy(args: argparse.Namespace) -> int:
     """Deploy OVFs listed in a CSV file via VM Service."""
@@ -2254,13 +2234,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         libraries = supervisor.list_content_libraries(args.namespace)
         print(f"Content libraries in namespace: {libraries}")
 
+        supervisor.disconnect()
+        supervisor = None
         vcenter.disconnect()
         vcenter = None
 
         results: list[DeployResult] = []
         report_path = args.report or (os.path.splitext(args.csv)[0] + ".report.html")
         results_lock = threading.Lock()
-        ssh_lock = threading.Lock()
         run_start = time.time()
 
         def record(result: DeployResult) -> None:
@@ -2280,9 +2261,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 args.vcenter, args.vcenter_user,
                 args.vcenter_password, args.vcenter_root_password
             )
-            sv = _LockedSupervisorClient(supervisor, ssh_lock)
+            sv = SupervisorClient(supervisor_ip, supervisor_password)
             try:
                 vc.connect()
+                sv.connect()
 
                 print(f"  Item name: '{item_name}' -> VM name: '{vm_name}'")
                 print("  Parsing OVF descriptor...")
@@ -2415,6 +2397,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
             finally:
                 vc.disconnect()
+                sv.disconnect()
 
         workers = getattr(args, "parallel", 1)
         if workers > 1:
