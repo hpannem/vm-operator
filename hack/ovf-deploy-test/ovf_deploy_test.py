@@ -1307,16 +1307,18 @@ class VCenterClient:
         add_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}/file"
         response = self.rest_session.post(add_url, json=add_spec)
         if not response.ok:
-            if response.status_code >= 500:
-                # vCenter internal error registering the PULL (e.g. relative path in OVF).
-                # Don't raise — let the session proceed to complete so vCenter reports
-                # the real validation error from the task.
-                print(f"  Warning: could not register PULL for {filename} "
-                      f"({response.status_code}), vCenter will report the reason at complete")
-                return
+            # Extract error message from response
+            error_msg = response.text
+            try:
+                err_json = response.json()
+                msgs = [m.get("default_message", "") for m in err_json.get("messages", []) if m.get("default_message")]
+                if msgs:
+                    error_msg = " ".join(msgs)
+            except Exception:
+                pass
             raise RuntimeError(
                 f"Failed to add file {filename} for PULL: "
-                f"{response.status_code} {response.reason}\n{response.text}"
+                f"{response.status_code} {response.reason} — {error_msg}"
             )
         print(f"  Added file {filename} (PULL from {file_url})")
 
