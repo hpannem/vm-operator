@@ -279,6 +279,22 @@ class _VCenterSession(requests.Session):
 class VCenterClient:
     """Client for vCenter operations using pyvmomi."""
 
+    @staticmethod
+    def _extract_error_message(response) -> str:
+        """Extract human-readable error message from a vCenter REST API error response."""
+        try:
+            err_json = response.json()
+            # Try to get default_message from messages array
+            msgs = [m.get("default_message", "") for m in err_json.get("messages", []) if m.get("default_message")]
+            if msgs:
+                return " ".join(msgs)
+            # Fallback to error_type
+            if err_json.get("error_type"):
+                return f"{err_json['error_type']}: {response.text[:200]}"
+        except Exception:
+            pass
+        return response.text[:500] if response.text else response.reason
+
     def __init__(self, host: str, user: str, password: str, root_password: Optional[str] = None):
         self.host = host
         self.user = user
@@ -337,10 +353,19 @@ class VCenterClient:
 
     def disconnect(self) -> None:
         """Disconnect from vCenter."""
+        # Delete REST API session to free up session slot
+        if self.rest_session:
+            try:
+                self.rest_session.delete(f"https://{self.host}/api/session")
+            except Exception:
+                pass
+            self.rest_session = None
         if self.ssh:
             self.ssh.close()
+            self.ssh = None
         if self.si:
             Disconnect(self.si)
+            self.si = None
             print("Disconnected from vCenter")
 
     def is_vm_powered_on(self, vm_name: str) -> bool:
@@ -832,13 +857,28 @@ class VCenterClient:
     def find_content_library(self, name: str) -> Optional[str]:
         """Find a content library by name and return its ID."""
         url = f"https://{self.host}/api/content/library"
-        response = self.rest_session.get(url)
-        response.raise_for_status()
+        
+        # Retry on 503 Service Unavailable
+        for attempt in range(5):
+            response = self.rest_session.get(url)
+            if response.status_code != 503:
+                break
+            error_msg = self._extract_error_message(response)
+            wait = 5 * (attempt + 1)
+            print(f"  Content library service unavailable (503): {error_msg[:100]}... retrying in {wait}s")
+            time.sleep(wait)
+        if not response.ok:
+            error_msg = self._extract_error_message(response)
+            raise RuntimeError(f"Content library API failed: {response.status_code} — {error_msg}")
 
         library_ids = response.json()
         for lib_id in library_ids:
             lib_url = f"https://{self.host}/api/content/library/{lib_id}"
             lib_response = self.rest_session.get(lib_url)
+            if lib_response.status_code == 503:
+                # Retry once for individual library fetch
+                time.sleep(5)
+                lib_response = self.rest_session.get(lib_url)
             lib_response.raise_for_status()
             lib_info = lib_response.json()
             if lib_info.get("name") == name:
@@ -858,8 +898,19 @@ class VCenterClient:
             "name": item_name,
             "library_id": library_id,
         }
-        response = self.rest_session.post(find_url, json=find_spec)
-        response.raise_for_status()
+        
+        # Retry on 503 Service Unavailable
+        for attempt in range(5):
+            response = self.rest_session.post(find_url, json=find_spec)
+            if response.status_code != 503:
+                break
+            error_msg = self._extract_error_message(response)
+            wait = 5 * (attempt + 1)
+            print(f"  Content library service unavailable (503): {error_msg[:100]}... retrying in {wait}s")
+            time.sleep(wait)
+        if not response.ok:
+            error_msg = self._extract_error_message(response)
+            raise RuntimeError(f"Content library find failed: {response.status_code} — {error_msg}")
 
         item_ids = response.json()
         if not item_ids:
@@ -868,7 +919,13 @@ class VCenterClient:
         # Fetch details for the first matching item to get size
         item_id = item_ids[0]
         item_url = f"https://{self.host}/api/content/library/item/{item_id}"
-        item_response = self.rest_session.get(item_url)
+        
+        for attempt in range(3):
+            item_response = self.rest_session.get(item_url)
+            if item_response.status_code != 503:
+                break
+            time.sleep(5)
+            
         if item_response.status_code == 404:
             return None
         item_response.raise_for_status()
@@ -966,14 +1023,13 @@ class VCenterClient:
             response = self.rest_session.post(create_url, json=create_spec)
             if response.status_code != 503:
                 break
+            error_msg = self._extract_error_message(response)
             wait = 10 * (attempt + 1)
-            print(f"  Content library service unavailable (503), retrying in {wait}s...")
+            print(f"  Content library service unavailable (503): {error_msg[:100]}... retrying in {wait}s")
             time.sleep(wait)
         if not response.ok:
-            raise RuntimeError(
-                f"Failed to create library item: "
-                f"{response.status_code} {response.reason}\n{response.text}"
-            )
+            error_msg = self._extract_error_message(response)
+            raise RuntimeError(f"Failed to create library item: {response.status_code} — {error_msg}")
         item_id = response.json()
         print(f"  Created library item with ID: {item_id}")
 
@@ -1078,8 +1134,25 @@ class VCenterClient:
         This is required for PULL transfers where vCenter downloads files asynchronously.
         """
         files_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}/file"
+        session_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}"
         deadline = time.time() + timeout
         while time.time() < deadline:
+            # Check session state first — if it's no longer ACTIVE, fail fast
+            session_resp = self.rest_session.get(session_url)
+            if session_resp.status_code == 404:
+                return 0
+            if session_resp.ok:
+                session_info = session_resp.json()
+                session_state = session_info.get("state", "")
+                if session_state not in ("ACTIVE", ""):
+                    # Session is in ERROR, CANCELED, or DONE state
+                    error_msg = session_info.get("error_message", {})
+                    if isinstance(error_msg, dict):
+                        error_msg = error_msg.get("default_message") or str(error_msg)
+                    raise RuntimeError(
+                        f"Session {session_id} is in {session_state} state: {error_msg or 'no details'}"
+                    )
+
             response = self.rest_session.get(files_url)
             if response.status_code == 404:
                 # Session was auto-cancelled by vCenter (e.g. PULL registration
@@ -1096,9 +1169,9 @@ class VCenterClient:
                 print(f"  All {len(files)} file(s) ready ({total_bytes} bytes)")
                 return total_bytes
 
-            # If every non-ready file is in ERROR, fail fast with all errors at once.
+            # If ANY file is in ERROR, fail fast — no point waiting for others.
             errors = {name: st for name, st in not_ready.items() if st == "ERROR"}
-            if errors and errors.keys() == not_ready.keys():
+            if errors:
                 # Fetch per-file error details if available
                 details = {}
                 for f in files:
@@ -1120,8 +1193,9 @@ class VCenterClient:
                     f"Details: {details}"
                 )
 
-            transferring = list(not_ready.keys())
-            print(f"  Waiting for transfer: {transferring} ...")
+            # Show file names with their current status
+            status_info = [f"{name}={st}" for name, st in not_ready.items()]
+            print(f"  Waiting for transfer: {status_info} ...")
             time.sleep(poll_interval)
 
         raise RuntimeError(
