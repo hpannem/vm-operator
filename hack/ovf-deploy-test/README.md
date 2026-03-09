@@ -49,13 +49,14 @@ Uploads OVFs to a content library without deploying them. Run this before
 `deploy` or `validate` to pre-populate the library and isolate upload failures
 from test failures.
 
-**Smart re-run behavior:** a state file (`<csv>.setup-state.json`) is written
-after each entry. On re-run, entries that previously failed with a permanent
-error (bad OVF, bad checksum, invalid descriptor, etc.) are skipped
-automatically. Only transient failures (503, timeout, connection reset) are
-retried. Re-run until no transient `SETUP_FAILED` entries remain, then run
-`deploy` or `validate`. Delete the state file to force a full re-run from
-scratch.
+**Smart re-run behavior:** a state file (`<csv>.setup-state.<vcenter>.<library>.json`)
+is written after each entry. The vCenter IP and library name are embedded in
+the filename so switching environments automatically gets a fresh state. On
+re-run, entries that previously failed with a permanent error (bad OVF, bad
+checksum, invalid descriptor, etc.) are skipped automatically. Only transient
+failures (503, timeout, connection reset) are retried. Re-run until no
+transient `SETUP_FAILED` entries remain, then run `deploy` or `validate`.
+Delete the state file to force a full re-run from scratch.
 
 OVFs already present in the content library are reported as `SUCCESS` (goal
 achieved — no upload needed).
@@ -326,7 +327,7 @@ ovf_files.csv    OvfEntry list             OvfEntry list                 OvfEntr
                Reports:                  With --cleanup: upload inline,
                <csv>.with-cl-setup       delete CL item after test      Report:
                .report.html              (no setup dependency)          <csv>.with-cl.report.html
-               <csv>.setup-state.json
+               <csv>.setup-state.<vc>.<lib>.json
                                          Report:
                                          <csv>.with-vmop.report.html
 ```

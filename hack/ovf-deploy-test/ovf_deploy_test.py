@@ -2217,7 +2217,7 @@ def _is_transient_upload_error(reason: str) -> bool:
 def cmd_setup(args: argparse.Namespace) -> int:
     """Upload OVFs to a content library without deploying them.
 
-    Maintains a state file (<csv>.setup-state.json) so re-runs skip OVFs that
+    Maintains a state file (<csv>.setup-state.<vcenter>.<library>.json) so re-runs skip OVFs that
     previously failed with a permanent error (bad OVF, bad checksum, etc.) and
     only retry transient failures (503, timeout, connection reset, etc.).
     Delete the state file to force a full re-run.
@@ -2249,7 +2249,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
         return 1
 
     # State file: maps entry name -> {"status": ..., "reason": ..., "transient": bool}
-    state_path = os.path.splitext(args.csv)[0] + ".setup-state.json"
+    # Include vCenter IP and library name in the state file name so different
+    # environments never share state.
+    safe_vc = args.vcenter.replace(":", "_").replace("/", "_")
+    safe_lib = args.content_library.replace("/", "_")
+    state_path = os.path.splitext(args.csv)[0] + f".setup-state.{safe_vc}.{safe_lib}.json"
     state: dict = {}
     if os.path.exists(state_path):
         try:
