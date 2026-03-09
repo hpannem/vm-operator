@@ -92,7 +92,7 @@ options:
                             vCenter root SSH password (default: same as --vcenter-password)
   --content-library NAME    Content library name (default: ovftest)
   --parallel N              Number of OVFs to upload concurrently (default: 1)
-  --report PATH             Path to write the HTML report (default: <csv>.with-cl-setup.report.html)
+  --report PATH             Path to write the HTML report (default: <csv>.<vcenter>.with-cl-setup.report.html)
 ```
 
 ### `deploy` — Deploy OVFs from a CSV
@@ -155,8 +155,9 @@ options:
   --network-type {nsx,vds}  Network type: nsx uses SubnetSet, vds uses Network (default: nsx)
   --cleanup                 Upload OVF inline and delete CL item after test (self-contained mode)
   --no-cleanup-cl           When --cleanup is set, skip deleting the content library item
+  --skip-vapps              Skip multi-VM vApp OVFs instead of attempting deployment (default: attempt)
   --parallel N              Number of OVFs to deploy concurrently (default: 1)
-  --report PATH             Path to write the HTML report (default: <csv>.with-vmop.report.html)
+  --report PATH             Path to write the HTML report (default: <csv>.<vcenter>.with-vmop.report.html)
 ```
 
 ### `validate` — Validate OVFs directly via vSphere API
@@ -206,7 +207,7 @@ options:
                             Required on Supervisor clusters — pass a non-Supervisor child RP
                             (the script prints the full RP tree at startup to help identify it).
   --parallel N              Number of OVFs to validate concurrently (default: 1)
-  --report PATH             Path to write the HTML report (default: <csv>.with-cl.report.html)
+  --report PATH             Path to write the HTML report (default: <csv>.<vcenter>.with-cl.report.html)
 ```
 
 > **Supervisor clusters**: the root resource pool of a Supervisor-enabled cluster

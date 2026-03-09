@@ -2265,7 +2265,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
             state = {}
 
     results: list[DeployResult] = []
-    report_path = args.report or (os.path.splitext(args.csv)[0] + ".with-cl-setup.report.html")
+    safe_vc = args.vcenter.replace(":", "_").replace("/", "_")
+    report_path = args.report or (os.path.splitext(args.csv)[0] + f".{safe_vc}.with-cl-setup.report.html")
     results_lock = threading.Lock()
     run_start = time.time()
 
@@ -2420,7 +2421,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         vcenter = None
 
         results: list[DeployResult] = []
-        report_path = args.report or (os.path.splitext(args.csv)[0] + ".with-vmop.report.html")
+        _safe_vc = args.vcenter.replace(":", "_").replace("/", "_")
+        report_path = args.report or (os.path.splitext(args.csv)[0] + f".{_safe_vc}.with-vmop.report.html")
         results_lock = threading.Lock()
         run_start = time.time()
 
@@ -2452,12 +2454,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 ovf_info = fetch_ovf_info(entry.source)
                 if ovf_info:
                     if ovf_info.is_vapp:
-                        print("    Type: vApp (VirtualSystemCollection) - skipping, not supported by VM Service")
-                        record(DeployResult(
-                            name=entry.name, source=entry.source, vm_name=vm_name,
-                            status="SKIPPED", reason="Multi-VM OVF not supported by VM Service"
-                        ))
-                        return
+                        print("    Type: vApp (VirtualSystemCollection)")
+                        if getattr(args, "skip_vapps", False):
+                            record(DeployResult(
+                                name=entry.name, source=entry.source, vm_name=vm_name,
+                                status="SKIPPED", reason="Multi-VM vApp skipped (--skip-vapps)"
+                            ))
+                            return
                     if ovf_info.has_networks():
                         print(f"    Networks: {[n.name for n in ovf_info.networks]}")
                     if ovf_info.has_properties():
@@ -2630,7 +2633,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"ERROR: No valid entries found in {args.csv}")
         return 1
 
-    report_path = args.report or (os.path.splitext(args.csv)[0] + ".with-cl.report.html")
+    _safe_vc = args.vcenter.replace(":", "_").replace("/", "_")
+    report_path = args.report or (os.path.splitext(args.csv)[0] + f".{_safe_vc}.with-cl.report.html")
     results: list[DeployResult] = []
     results_lock = threading.Lock()
     run_start = time.time()
@@ -2856,6 +2860,11 @@ def main() -> int:
         help="When --cleanup is set, skip deleting the content library item"
     )
     p_deploy.add_argument(
+        "--skip-vapps",
+        action="store_true",
+        help="Skip multi-VM vApp OVFs (VirtualSystemCollection) instead of attempting deployment"
+    )
+    p_deploy.add_argument(
         "--parallel",
         type=int,
         default=1,
@@ -2864,7 +2873,7 @@ def main() -> int:
     )
     p_deploy.add_argument(
         "--report",
-        help="Path to write the results report (default: <csv>.with-vmop.report.html)"
+        help="Path to write the results report (default: <csv>.<vcenter>.with-vmop.report.html)"
     )
 
     # --- setup subcommand ---
