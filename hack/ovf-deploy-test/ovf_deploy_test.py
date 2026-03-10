@@ -712,6 +712,10 @@ class VCenterClient:
                     WaitForTask(obj.Destroy())
                     print(f"  Pre-deploy cleanup: deleted '{name}'")
                 except Exception as e:
+                    # Already gone — another worker or vCenter cleaned it up
+                    if "ManagedObjectNotFound" in type(e).__name__ or "has already been deleted" in str(e):
+                        print(f"  Pre-deploy cleanup: '{name}' already gone, skipping")
+                        continue
                     raise RuntimeError(
                         f"Pre-deploy cleanup: could not delete existing {obj_type.__name__} "
                         f"'{name}' ({obj._moId}): {e}"
@@ -719,29 +723,34 @@ class VCenterClient:
 
     def power_on_vapp_by_id(self, vapp_id: str) -> None:
         """Power on a vApp by its MoRef ID using the SOAP API."""
-        from pyVmomi import vim as _vim
+        from pyVmomi import vim as _vim, vmodl as _vmodl
         from pyVim.task import WaitForTask
         vapp = _vim.VirtualApp(vapp_id)
         vapp._stub = self.si._stub
-        task = vapp.PowerOn()
         try:
+            task = vapp.PowerOn()
             WaitForTask(task)
         except _vim.fault.MissingIpPool as e:
             raise RuntimeError(
                 f"vApp power-on requires an IP pool on network '{e.value}' "
                 f"(property '{e.id}'). Assign an IP pool to that network in vCenter."
             ) from e
+        except _vmodl.fault.ManagedObjectNotFound:
+            raise RuntimeError(f"vApp {vapp_id} not found — may have been deleted by a concurrent operation")
 
     def wait_for_vapp_powered_on_by_id(self, vapp_id: str,
                                         timeout: int = VM_TOOLS_WAIT_TIMEOUT) -> bool:
         """Poll vApp power state via SOAP until powered on or timeout."""
-        from pyVmomi import vim as _vim
+        from pyVmomi import vim as _vim, vmodl as _vmodl
         vapp = _vim.VirtualApp(vapp_id)
         vapp._stub = self.si._stub
         start = time.time()
         while time.time() - start < timeout:
-            if vapp.summary.vAppState == "started":
-                return True
+            try:
+                if vapp.summary.vAppState == "started":
+                    return True
+            except _vmodl.fault.ManagedObjectNotFound:
+                return False
             time.sleep(POLL_INTERVAL)
         return False
 
@@ -1105,45 +1114,57 @@ class VCenterClient:
         return session_id
 
     def _complete_update_session(self, session_id: str) -> None:
-        """Complete an update session. Raises on failure with detailed error."""
+        """
+        Complete an update session and wait for the import task to finish.
+
+        The complete API returns 200 OK immediately but the actual vCenter import
+        task runs asynchronously. We must poll the session state until it reaches
+        DONE (success) or ERROR (failure).
+        """
         complete_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=complete"
         response = self.rest_session.post(complete_url)
-        
-        if response.ok:
-            return
-        
-        # Extract error details
-        body = response.text
-        
-        # If session is gone (404), vCenter auto-cancelled it — fetch the real reason
-        if response.status_code == 404:
-            session_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}"
-            detail_resp = self.rest_session.get(session_url)
-            if detail_resp.ok:
-                session_info = detail_resp.json()
+
+        if not response.ok:
+            # complete request itself was rejected
+            body = response.text
+            reason = self._extract_error_message(response) or body
+            body_lower = body.lower()
+            if "certificate" in body_lower and any(kw in body_lower for kw in
+                    ("expired", "not trusted", "certificate_unknown", "self-signed")):
+                raise UntrustedSourceError(f"Source TLS certificate not trusted: {body}")
+            raise RuntimeError(f"Failed to complete update session: {reason}")
+
+        # Poll until session reaches a terminal state (DONE or ERROR)
+        session_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}"
+        deadline = time.time() + 300  # 5 min max for import task
+        poll_interval = 5
+        while time.time() < deadline:
+            resp = self.rest_session.get(session_url)
+            if resp.status_code == 404:
+                # Session was removed by vCenter — treat as success (DONE auto-cleanup)
+                return
+            if not resp.ok:
+                time.sleep(poll_interval)
+                continue
+            session_info = resp.json()
+            state = session_info.get("state", "")
+            if state == "DONE":
+                return
+            if state == "ERROR":
                 error_msg = session_info.get("error_message", {})
                 if isinstance(error_msg, dict):
-                    body = error_msg.get("default_message") or str(error_msg)
-                elif error_msg:
-                    body = str(error_msg)
+                    msg = error_msg.get("default_message") or str(error_msg)
+                else:
+                    msg = str(error_msg) if error_msg else "unknown error"
+                msg_lower = msg.lower()
+                if "certificate" in msg_lower and any(kw in msg_lower for kw in
+                        ("expired", "not trusted", "certificate_unknown", "self-signed")):
+                    raise UntrustedSourceError(f"Source TLS certificate not trusted: {msg}")
+                raise RuntimeError(f"Content library import failed: {msg}")
+            # Still ACTIVE — keep waiting
+            time.sleep(poll_interval)
 
-        # Check for certificate errors
-        body_lower = body.lower()
-        if "certificate" in body_lower and any(kw in body_lower for kw in 
-                ("expired", "not trusted", "certificate_unknown", "self-signed")):
-            raise UntrustedSourceError(f"Source TLS certificate not trusted: {body}")
-        
-        # Extract human-readable message from JSON error body
-        reason = body
-        try:
-            err_json = response.json()
-            msgs = [m.get("default_message", "") for m in err_json.get("messages", []) if m.get("default_message")]
-            if msgs:
-                reason = " ".join(msgs)
-        except Exception:
-            pass
-        
-        raise RuntimeError(f"Failed to complete update session: {reason}")
+        raise RuntimeError(f"Timed out waiting for import session {session_id} to complete")
 
     def _cleanup_failed_upload(self, session_id: Optional[str], item_id: Optional[str]) -> None:
         """Cancel session and delete incomplete library item after a failed upload."""
@@ -1201,6 +1222,13 @@ class VCenterClient:
             if not not_ready:
                 total_bytes = sum(f.get("size", 0) for f in files)
                 print(f"  All {len(files)} file(s) ready ({total_bytes} bytes)")
+                if total_bytes == 0 and files:
+                    # vCenter marked files READY but transferred 0 bytes — broken upload
+                    names = [f["name"] for f in files]
+                    raise RuntimeError(
+                        f"File transfer reported READY but 0 bytes transferred for: {names}. "
+                        f"Source file likely missing or inaccessible."
+                    )
                 return total_bytes
 
             # If ANY file is in ERROR, fail fast — no point waiting for others.
@@ -2004,6 +2032,21 @@ def _smart_value_for_property(prop: OvfProperty, for_vcenter: bool = False) -> s
         default = prop.default.capitalize() if prop.default else ""
         return default if default in ("True", "False") else "False"
 
+    if typ in ("uint8", "sint8"):
+        return prop.default if prop.default else "0"
+
+    if typ in ("uint16", "sint16"):
+        return prop.default if prop.default else "0"
+
+    if typ in ("uint32", "sint32"):
+        return prop.default if prop.default else "0"
+
+    if typ in ("uint64", "sint64"):
+        return prop.default if prop.default else "0"
+
+    if typ in ("real32", "real64"):
+        return prop.default if prop.default else "0.0"
+
     # Non-user-configurable with a default: keep it as-is.
     if not prop.user_configurable and prop.default:
         return prop.default
@@ -2394,10 +2437,23 @@ _TRANSIENT_UPLOAD_ERRORS = (
     "connection aborted",
 )
 
+# Errors that are definitively permanent — file doesn't exist at source, corrupt disk, etc.
+_PERMANENT_UPLOAD_ERRORS = (
+    "was not found",
+    "file not found",
+    "no such file",
+    "unable to parse disk image",
+    "invalid sparse header",
+    "invalid magic",
+)
+
 
 def _is_transient_upload_error(reason: str) -> bool:
     """Return True if the upload failure reason looks like a transient infrastructure error."""
     lower = reason.lower()
+    # Permanent errors take priority — never retry these
+    if any(pat in lower for pat in _PERMANENT_UPLOAD_ERRORS):
+        return False
     return any(pat in lower for pat in _TRANSIENT_UPLOAD_ERRORS)
 
 
@@ -2520,14 +2576,32 @@ def cmd_setup(args: argparse.Namespace) -> int:
             existing = vc.find_library_item(library_id, entry.name)
             if existing:
                 if existing["size"] > 0:
-                    print(f"  Already in content library, skipping upload")
+                    # If state also says SUCCESS, we're done
+                    if prev and prev.get("status") == "SUCCESS":
+                        print(f"  Already in content library with valid size, skipping upload")
+                        record(DeployResult(
+                            name=entry.name, source=entry.source, vm_name="",
+                            status="SUCCESS", reason="Already present in content library"
+                        ))
+                        return
+                    # State doesn't say SUCCESS (e.g. transient failure last run) but item is
+                    # present and non-empty — treat as success, no need to re-upload
+                    print(f"  Item present in content library ({existing['size']} bytes), marking SUCCESS")
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name="",
                         status="SUCCESS", reason="Already present in content library"
                     ))
                     return
                 else:
-                    print(f"  Found 0-byte item in content library — will delete and re-upload")
+                    print(f"  Found 0-byte item in content library — deleting and re-uploading")
+                    # upload_ovf will also delete it, but do it here so the state is clear
+                    try:
+                        vc.delete_library_item(existing["id"])
+                    except Exception as _del_err:
+                        print(f"  Warning: could not delete 0-byte item: {_del_err}")
+            elif prev and prev.get("status") == "SUCCESS":
+                # State says SUCCESS but item is gone from CL — re-upload
+                print(f"  State says SUCCESS but item missing from content library — re-uploading")
 
             try:
                 vc.upload_ovf(library_id, entry.source, entry.name)
@@ -2949,7 +3023,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
                     return
 
                 vc.delete_existing_by_name(vm_name)
-                for _deploy_attempt in range(2):
+                for _deploy_attempt in range(5):
                     try:
                         resource_id, resource_type = vc.deploy_library_item(
                             cl_item["id"], vm_name,
@@ -2959,9 +3033,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
                         )
                         break
                     except RuntimeError as _deploy_err:
-                        if "already exists" in str(_deploy_err) and _deploy_attempt == 0:
+                        if "already exists" in str(_deploy_err) and _deploy_attempt < 4:
                             import uuid as _uuid
-                            vm_name = vm_name_base + "-" + _uuid.uuid4().hex[:6]
+                            vm_name = vm_name_base + "-" + _uuid.uuid4().hex[:8]
                             print(f"  Name collision on deploy, retrying with new name: {vm_name}")
                             vc.delete_existing_by_name(vm_name)
                         else:
