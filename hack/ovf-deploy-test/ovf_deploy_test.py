@@ -2384,6 +2384,27 @@ def _is_transient_upload_error(reason: str) -> bool:
     return any(pat in lower for pat in _TRANSIENT_UPLOAD_ERRORS)
 
 
+def _load_setup_state(csv_path: str, vcenter: str, content_library: str) -> dict:
+    """
+    Load the setup state file written by cmd_setup.
+    Returns a dict mapping entry name -> {"status": ..., "transient": bool}.
+    Returns empty dict if no state file exists.
+    """
+    safe_vc = vcenter.replace(":", "_").replace("/", "_")
+    safe_lib = content_library.replace("/", "_")
+    state_path = os.path.splitext(csv_path)[0] + f".setup-state.{safe_vc}.{safe_lib}.json"
+    if not os.path.exists(state_path):
+        return {}
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+        print(f"Loaded setup state from {state_path} ({len(state)} entries)")
+        return state
+    except Exception as e:
+        print(f"Warning: could not read setup state {state_path}: {e}")
+        return {}
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     """Upload OVFs to a content library without deploying them.
 
@@ -2608,6 +2629,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         results_lock = threading.Lock()
         run_start = time.time()
 
+        # Load setup state to skip permanently failed uploads
+        setup_state = _load_setup_state(args.csv, args.vcenter, args.content_library)
+
         def record(result: DeployResult) -> None:
             with results_lock:
                 results.append(result)
@@ -2626,6 +2650,18 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
             try:
                 print(f"  Item name: '{item_name}' -> VM name: '{vm_name}'")
+
+                if not args.cleanup:
+                    # Pre-populated mode: only process entries that succeeded in setup
+                    prev = setup_state.get(entry.name, {})
+                    if prev.get("status") != "SUCCESS":
+                        print(f"  Skipping — not in setup state as SUCCESS (status={prev.get('status', 'missing')})")
+                        return
+                    cl_check = vc.find_library_item(library_id, item_name)
+                    if not cl_check or cl_check["size"] == 0:
+                        print(f"  Skipping — item missing or empty in content library despite SUCCESS state")
+                        return
+
                 print("  Parsing OVF descriptor...")
                 ovf_info = fetch_ovf_info(entry.source)
                 if ovf_info:
@@ -2654,16 +2690,6 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                         vc.upload_ovf(library_id, entry.source, item_name)
                     except Exception as upload_err:
                         raise SetupError(f"Content library upload failed: {upload_err}") from upload_err
-                else:
-                    # Pre-populated mode: CL must already contain the item (run setup first).
-                    cl_check = vc.find_library_item(library_id, item_name)
-                    if not cl_check:
-                        record(DeployResult(
-                            name=entry.name, source=entry.source, vm_name=vm_name,
-                            status="SKIPPED",
-                            reason="Not in content library — run 'setup' first"
-                        ))
-                        return
 
                 vmi_name, vmi_error, failed_vmi_name = sv.wait_for_vmi(args.namespace, item_name)
                 if not vmi_name:
@@ -2828,6 +2854,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
     results_lock = threading.Lock()
     run_start = time.time()
 
+    # Load setup state to skip permanently failed uploads and avoid re-uploading
+    setup_state = _load_setup_state(args.csv, args.vcenter, args.content_library)
+
     def record(result: DeployResult) -> None:
         with results_lock:
             results.append(result)
@@ -2868,24 +2897,29 @@ def cmd_validate(args: argparse.Namespace) -> int:
             resource_id: Optional[str] = None
             resource_type: str = "VirtualMachine"
             try:
-                try:
-                    vc.upload_ovf(library_id, entry.source, item_name)
-                except UntrustedSourceError:
-                    record(DeployResult(
-                        name=entry.name, source=entry.source, vm_name=vm_name,
-                        status="SKIPPED",
-                        reason="Source TLS certificate could not be added to vCenter trust store"
-                    ))
-                    return
-                except Exception as e:
-                    record(DeployResult(
-                        name=entry.name, source=entry.source, vm_name=vm_name,
-                        status="SETUP_FAILED",
-                        reason=f"Content library upload failed: {e}"
-                    ))
-                    return
+                if args.cleanup:
+                    # Self-contained mode: upload inline, delete CL item after test
+                    try:
+                        vc.upload_ovf(library_id, entry.source, item_name)
+                    except Exception as e:
+                        record(DeployResult(
+                            name=entry.name, source=entry.source, vm_name=vm_name,
+                            status="SETUP_FAILED",
+                            reason=f"Content library upload failed: {e}"
+                        ))
+                        return
+                    cl_item = vc.find_library_item(library_id, item_name)
+                else:
+                    # Pre-populated mode: only process entries that succeeded in setup
+                    prev = setup_state.get(entry.name, {})
+                    if prev.get("status") != "SUCCESS":
+                        print(f"  Skipping — not in setup state as SUCCESS (status={prev.get('status', 'missing')})")
+                        return
+                    cl_item = vc.find_library_item(library_id, item_name)
+                    if not cl_item or cl_item["size"] == 0:
+                        print(f"  Skipping — item missing or empty in content library despite SUCCESS state")
+                        return
 
-                cl_item = vc.find_library_item(library_id, item_name)
                 if not cl_item:
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name=vm_name,
@@ -2944,6 +2978,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
                         vc.delete_vapp_by_id(resource_id)
                     else:
                         vc.delete_vm_by_id(resource_id)
+                if args.cleanup:
+                    # In --cleanup mode, delete the CL item we uploaded inline
+                    try:
+                        cl_item_to_del = vc.find_library_item(library_id, item_name)
+                        if cl_item_to_del:
+                            vc.delete_library_item(cl_item_to_del["id"])
+                    except Exception as _del_err:
+                        print(f"  Warning: could not delete CL item '{item_name}': {_del_err}")
 
         def validate_one_parallel(entry: OvfEntry) -> None:
             """Wrapper for parallel execution — creates its own vCenter client."""
@@ -3142,6 +3184,11 @@ def main() -> int:
     p_validate.add_argument(
         "--report",
         help="Path to write the results report (default: <csv>.with-cl.report.html)"
+    )
+    p_validate.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Upload OVFs inline and delete CL item after test (default: use pre-populated CL from 'setup')"
     )
 
     args = parser.parse_args()
