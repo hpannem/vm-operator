@@ -1842,6 +1842,23 @@ class SupervisorClient:
         self.run_kubectl(f"delete vm -n {namespace} {vm_name} --ignore-not-found")
         print(f"  Deleted VM {vm_name}")
 
+    def delete_all_vms(self, namespace: str) -> None:
+        """Delete all VirtualMachines in the given namespace."""
+        stdout, _, _ = self.run_kubectl(
+            f"get vm -n {namespace} -o jsonpath='{{.items[*].metadata.name}}'", check=False
+        )
+        names = stdout.strip().split() if stdout.strip() else []
+        if not names:
+            print(f"  No VMs found in namespace '{namespace}'")
+            return
+        print(f"  Deleting {len(names)} VM(s) in namespace '{namespace}'...")
+        for name in names:
+            try:
+                self.run_kubectl(f"delete vm -n {namespace} {name} --ignore-not-found")
+                print(f"    Deleted VM '{name}'")
+            except Exception as e:
+                print(f"    Warning: could not delete VM '{name}': {e}")
+
 
 def discover_ovfs(base_url: str) -> list[str]:
     """
@@ -2623,6 +2640,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         libraries = supervisor.list_content_libraries(args.namespace)
         print(f"Content libraries in namespace: {libraries}")
 
+        print(f"Purging existing VMs in namespace '{args.namespace}' before starting...")
+        supervisor.delete_all_vms(args.namespace)
+
         results: list[DeployResult] = []
         _safe_vc = args.vcenter.replace(":", "_").replace("/", "_")
         report_path = args.report or (os.path.splitext(args.csv)[0] + f".{_safe_vc}.with-vmop.report.html")
@@ -2648,6 +2668,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             print(f"Deploying: {entry.name}  ({entry.source})")
             print(f"{'=' * 60}")
 
+            vm_created = False
             try:
                 print(f"  Item name: '{item_name}' -> VM name: '{vm_name}'")
 
@@ -2730,6 +2751,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     network_type=args.network_type,
                     vapp_config=vapp_config,
                 )
+                vm_created = True
 
                 powered_on, _ = sv.wait_for_vm_powered_on(args.namespace, vm_name, vcenter=vc)
 
@@ -2748,22 +2770,6 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                         reason=f"VM did not reach Running phase within timeout. {reason}",
                         vmop_logs=logs
                     ))
-
-                # Always delete the VM after the test.
-                try:
-                    sv.delete_vm(args.namespace, vm_name)
-                except Exception as e:
-                    print(f"  Warning: VM deletion failed: {e}")
-
-                # In --cleanup mode, also delete the CL item (inline upload).
-                if args.cleanup and not args.no_cleanup_cl:
-                    try:
-                        cl_item = vc.find_library_item(library_id, item_name)
-                        if cl_item:
-                            vc.delete_library_item(cl_item["id"])
-                            print(f"  Deleted content library item '{item_name}'")
-                    except Exception as e:
-                        print(f"  Warning: CL item deletion failed: {e}")
 
             except UntrustedSourceError:
                 print(f"  Skipping: source server TLS certificate could not be trusted by vCenter")
@@ -2794,6 +2800,21 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     name=entry.name, source=entry.source, vm_name=vm_name,
                     status="FAILED", reason=reason, vmop_logs=logs
                 ))
+
+            finally:
+                if vm_created:
+                    try:
+                        sv.delete_vm(args.namespace, vm_name)
+                    except Exception as e:
+                        print(f"  Warning: VM deletion failed: {e}")
+                if args.cleanup and not args.no_cleanup_cl:
+                    try:
+                        cl_item = vc.find_library_item(library_id, item_name)
+                        if cl_item:
+                            vc.delete_library_item(cl_item["id"])
+                            print(f"  Deleted content library item '{item_name}'")
+                    except Exception as e:
+                        print(f"  Warning: CL item deletion failed: {e}")
 
         def deploy_one_parallel(entry: OvfEntry) -> None:
             """Wrapper for parallel execution — creates its own clients."""
