@@ -2481,12 +2481,15 @@ def cmd_setup(args: argparse.Namespace) -> int:
         try:
             existing = vc.find_library_item(library_id, entry.name)
             if existing:
-                print(f"  Already in content library, skipping upload")
-                record(DeployResult(
-                    name=entry.name, source=entry.source, vm_name="",
-                    status="SUCCESS", reason="Already present in content library"
-                ))
-                return
+                if existing["size"] > 0:
+                    print(f"  Already in content library, skipping upload")
+                    record(DeployResult(
+                        name=entry.name, source=entry.source, vm_name="",
+                        status="SUCCESS", reason="Already present in content library"
+                    ))
+                    return
+                else:
+                    print(f"  Found 0-byte item in content library — will delete and re-upload")
 
             try:
                 vc.upload_ovf(library_id, entry.source, entry.name)
