@@ -996,6 +996,9 @@ class VCenterClient:
         Upload an OVF/OVA to the content library from a URL or local file path.
         If an item with the same name exists but has 0 bytes (failed prior upload),
         it is deleted and re-uploaded.
+        
+        For untrusted certificates: attempts to add the cert to vCenter's trust
+        store once, then retries. If that also fails, raises UntrustedSourceError.
         """
         print(f"Uploading OVF '{item_name}' from {source} to content library...")
 
@@ -1009,16 +1012,65 @@ class VCenterClient:
                 print(f"  Item '{item_name}' exists but has 0 bytes (incomplete upload), deleting and re-uploading...")
                 self.delete_library_item(existing_item["id"])
 
-        ovf_url = source
+        # Try upload up to 2 times: first attempt, then retry after trusting cert if needed
+        cert_trusted = False
+        last_error: Optional[Exception] = None
+        
+        for attempt in range(2):
+            item_id = None
+            session_id = None
+            try:
+                # Create library item
+                item_id = self._create_library_item(library_id, item_name)
+                
+                # Create update session
+                session_id = self._create_update_session(item_id)
 
-        # Create library item
+                # Upload files to the session
+                self._upload_ovf_files(session_id, source)
+
+                # Wait for PULL transfers to complete
+                self._wait_for_session_files_ready(session_id)
+
+                # Complete the session
+                self._complete_update_session(session_id)
+                
+                print("  Upload completed successfully")
+                return item_id
+
+            except UntrustedSourceError as e:
+                last_error = e
+                self._cleanup_failed_upload(session_id, item_id)
+                
+                # Only try to trust cert on first attempt
+                if attempt == 0 and not cert_trusted:
+                    print("  Source TLS certificate not trusted — attempting to add to vCenter trust store...")
+                    if self._trust_source_cert(source):
+                        cert_trusted = True
+                        print("  Retrying upload with trusted certificate...")
+                        continue
+                # Either already tried trusting, or trust failed — give up
+                raise
+
+            except Exception as e:
+                last_error = e
+                self._cleanup_failed_upload(session_id, item_id)
+                raise
+
+        # Should not reach here, but just in case
+        if last_error:
+            raise last_error
+        raise RuntimeError("Upload failed unexpectedly")
+
+    def _create_library_item(self, library_id: str, item_name: str) -> str:
+        """Create a new library item. Returns the item ID."""
         create_spec = {
             "name": item_name,
             "library_id": library_id,
             "type": "ovf"
         }
-
         create_url = f"https://{self.host}/api/content/library/item"
+        
         for attempt in range(3):
             response = self.rest_session.post(create_url, json=create_spec)
             if response.status_code != 503:
@@ -1027,103 +1079,85 @@ class VCenterClient:
             wait = 10 * (attempt + 1)
             print(f"  Content library service unavailable (503): {error_msg[:100]}... retrying in {wait}s")
             time.sleep(wait)
+        
         if not response.ok:
             error_msg = self._extract_error_message(response)
             raise RuntimeError(f"Failed to create library item: {response.status_code} — {error_msg}")
+        
         item_id = response.json()
         print(f"  Created library item with ID: {item_id}")
+        return item_id
 
-        # Create update session
+    def _create_update_session(self, item_id: str) -> str:
+        """Create an update session for a library item. Returns the session ID."""
         session_spec = {"library_item_id": item_id}
         session_url = f"https://{self.host}/api/content/library/item/update-session"
         response = self.rest_session.post(session_url, json=session_spec)
+        
         if not response.ok:
             raise RuntimeError(
                 f"Failed to create update session: "
                 f"{response.status_code} {response.reason}\n{response.text}"
             )
+        
         session_id = response.json()
         print(f"  Created update session: {session_id}")
+        return session_id
 
+    def _complete_update_session(self, session_id: str) -> None:
+        """Complete an update session. Raises on failure with detailed error."""
+        complete_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=complete"
+        response = self.rest_session.post(complete_url)
+        
+        if response.ok:
+            return
+        
+        # Extract error details
+        body = response.text
+        
+        # If session is gone (404), vCenter auto-cancelled it — fetch the real reason
+        if response.status_code == 404:
+            session_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}"
+            detail_resp = self.rest_session.get(session_url)
+            if detail_resp.ok:
+                session_info = detail_resp.json()
+                error_msg = session_info.get("error_message", {})
+                if isinstance(error_msg, dict):
+                    body = error_msg.get("default_message") or str(error_msg)
+                elif error_msg:
+                    body = str(error_msg)
+
+        # Check for certificate errors
+        body_lower = body.lower()
+        if "certificate" in body_lower and any(kw in body_lower for kw in 
+                ("expired", "not trusted", "certificate_unknown", "self-signed")):
+            raise UntrustedSourceError(f"Source TLS certificate not trusted: {body}")
+        
+        # Extract human-readable message from JSON error body
+        reason = body
         try:
-            # Download OVF/OVA and upload files
-            self._upload_ovf_files(session_id, source)
+            err_json = response.json()
+            msgs = [m.get("default_message", "") for m in err_json.get("messages", []) if m.get("default_message")]
+            if msgs:
+                reason = " ".join(msgs)
+        except Exception:
+            pass
+        
+        raise RuntimeError(f"Failed to complete update session: {reason}")
 
-            # For PULL transfers, vCenter downloads files asynchronously.
-            # Wait until every file in the session reaches READY before completing.
-            self._wait_for_session_files_ready(session_id)
-
-            # Complete the session
-            complete_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=complete"
-            response = self.rest_session.post(complete_url)
-            if not response.ok:
-                body = response.text
-
-                # If the session is gone (404), vCenter auto-cancelled it due to a
-                # transfer error. Fetch the session details to get the real reason.
-                if response.status_code == 404:
-                    session_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}"
-                    detail_resp = self.rest_session.get(session_url)
-                    if detail_resp.ok:
-                        session_info = detail_resp.json()
-                        error_msg = session_info.get("error_message", {})
-                        if isinstance(error_msg, dict):
-                            body = error_msg.get("default_message") or str(error_msg)
-                        elif error_msg:
-                            body = str(error_msg)
-
-                if "certificate" in body.lower() and (
-                    "expired" in body.lower() or "not trusted" in body.lower()
-                    or "certificate_unknown" in body.lower()
-                ):
-                    raise UntrustedSourceError(
-                        f"Source server TLS certificate not trusted by vCenter: {body}"
-                    )
-                # Extract the human-readable message from the JSON error body.
-                reason = body
-                try:
-                    err_json = response.json()
-                    msgs = [m.get("default_message", "")
-                            for m in err_json.get("messages", [])
-                            if m.get("default_message")]
-                    if msgs:
-                        reason = " ".join(msgs)
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    f"Failed to complete update session: {reason}"
-                )
-            print("  Upload completed successfully")
-
-        except UntrustedSourceError:
-            # Cancel the session and clean up before retrying with forced trust.
-            cancel_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=cancel"
-            self.rest_session.post(cancel_url, timeout=30)
+    def _cleanup_failed_upload(self, session_id: Optional[str], item_id: Optional[str]) -> None:
+        """Cancel session and delete incomplete library item after a failed upload."""
+        if session_id:
+            try:
+                cancel_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=cancel"
+                self.rest_session.post(cancel_url, timeout=30)
+            except Exception:
+                pass
+        if item_id:
             try:
                 self.delete_library_item(item_id)
             except Exception:
                 pass
-
-            print("  Source TLS certificate not trusted — attempting to add to vCenter trust store and retry...")
-            if not self._trust_source_cert(ovf_url):
-                raise
-
-            # Retry the upload now that the cert is trusted
-            return self.upload_ovf(library_id, source, item_name)
-
-        except Exception as e:
-            # Cancel the session and clean up the incomplete library item
-            cancel_url = f"https://{self.host}/api/content/library/item/update-session/{session_id}?action=cancel"
-            cancel_resp = self.rest_session.post(cancel_url, timeout=30)
-            if not cancel_resp.ok:
-                print(f"  Warning: could not cancel session {session_id}: {cancel_resp.status_code}")
-            try:
-                self.delete_library_item(item_id)
-            except Exception:
-                pass
-            raise e
-
-        return item_id
 
     def _wait_for_session_files_ready(self, session_id: str,
                                       timeout: int = 600, poll_interval: int = 10) -> int:
@@ -1183,7 +1217,7 @@ class VCenterClient:
                 details_str = str(details)
                 if "certificate" in details_str.lower() and (
                     "expired" in details_str.lower() or "not trusted" in details_str.lower()
-                    or "certificate_unknown" in details_str.lower()
+                    or "certificate_unknown" in details_str.lower() or "self-signed" in details_str.lower()
                 ):
                     raise UntrustedSourceError(
                         f"Source server TLS certificate not trusted by vCenter: {details_str}"
@@ -2144,7 +2178,9 @@ def _timing_html(start_time: Optional[float], end_time: float) -> str:
 
 def write_report(results: list[DeployResult], report_path: str,
                  start_time: Optional[float] = None,
-                 title: str = "OVF Deploy Test Report") -> None:
+                 title: str = "OVF Deploy Test Report",
+                 vcenter_ip: str = "",
+                 show_vm_column: bool = True) -> None:
     """Write an HTML deployment results report and print a summary to stdout."""
     # Ensure the output path ends in .html
     if not report_path.endswith(".html"):
@@ -2179,11 +2215,11 @@ def write_report(results: list[DeployResult], report_path: str,
                 f'border-radius:4px;overflow:auto;max-height:300px;">'
                 f'{logs_escaped}</pre></details>'
             )
+        vm_cell = f'<td style="padding:8px 12px;font-family:monospace;font-size:0.9em;">{_html_escape(r.vm_name)}</td>' if show_vm_column else ""
         rows_html.append(
             f"<tr>"
             f'<td style="padding:8px 12px;">{name_cell}</td>'
-            f'<td style="padding:8px 12px;font-family:monospace;font-size:0.9em;">'
-            f'{_html_escape(r.vm_name)}</td>'
+            f'{vm_cell}'
             f'<td style="padding:8px 12px;text-align:center;">{badge}</td>'
             f'<td style="padding:8px 12px;font-size:0.85em;color:#24292f;">'
             f'{reason_escaped}{("<br>" + logs_cell) if logs_cell else ""}</td>'
@@ -2203,12 +2239,16 @@ def write_report(results: list[DeployResult], report_path: str,
                 f'{icon} {status}: {n}</span>'
             )
 
+    # Build title with vCenter IP if provided
+    full_title = f"{title} — {vcenter_ip}" if vcenter_ip else title
+    vm_header = "<th>VM Name</th>" if show_vm_column else ""
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} — {generated}</title>
+<title>{full_title} — {generated}</title>
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          margin: 32px; color: #24292f; background: #fff; }}
@@ -2226,14 +2266,14 @@ def write_report(results: list[DeployResult], report_path: str,
 </style>
 </head>
 <body>
-<h1>{title}</h1>
+<h1>{full_title}</h1>
 <div class="meta">Generated: {generated} &nbsp;|&nbsp; Total: {len(results)}{_timing_html(start_time, now)}</div>
 <div class="summary">{"".join(summary_parts)}</div>
 <table>
 <thead>
   <tr>
     <th>OVF Name</th>
-    <th>VM Name</th>
+    {vm_header}
     <th>Status</th>
     <th>Details</th>
   </tr>
@@ -2414,18 +2454,23 @@ def cmd_setup(args: argparse.Namespace) -> int:
             except Exception as e:
                 print(f"  Warning: could not write state file: {e}")
             write_report(results, report_path, start_time=run_start,
-                         title="OVF Content Library Setup")
+                         title="OVF Content Library Setup",
+                         vcenter_ip=args.vcenter, show_vm_column=False)
 
     def setup_one(entry: OvfEntry, vc: VCenterClient) -> None:
         """Process a single OVF entry using the provided vCenter client."""
         # Skip if previously failed with a permanent (non-transient) error.
         prev = state.get(entry.name)
         if prev and prev.get("status") == "SETUP_FAILED" and not prev.get("transient"):
-            print(f"\n[{entry.name}] Skipping — permanent failure from previous run: {prev.get('reason', '')[:100]}")
+            prev_reason = prev.get('reason', '')
+            # Don't double-prefix if already marked as permanent
+            if not prev_reason.startswith("[Permanent, not retried]"):
+                prev_reason = f"[Permanent, not retried] {prev_reason}"
+            print(f"\n[{entry.name}] Skipping — permanent failure from previous run: {prev_reason[:100]}")
             record(DeployResult(
                 name=entry.name, source=entry.source, vm_name="",
                 status="SETUP_FAILED",
-                reason=f"[Permanent, not retried] {prev.get('reason', '')}"
+                reason=prev_reason
             ))
             return
 
@@ -2445,11 +2490,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
             try:
                 vc.upload_ovf(library_id, entry.source, entry.name)
-            except UntrustedSourceError:
+            except UntrustedSourceError as e:
                 record(DeployResult(
                     name=entry.name, source=entry.source, vm_name="",
-                    status="SKIPPED",
-                    reason="Source TLS certificate could not be added to vCenter trust store"
+                    status="SETUP_FAILED",
+                    reason=f"Upload failed: {e}"
                 ))
                 return
             except Exception as e:
@@ -2500,7 +2545,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
     vcenter.disconnect()
 
     write_report(results, report_path, start_time=run_start,
-                 title="OVF Content Library Setup")
+                 title="OVF Content Library Setup",
+                 vcenter_ip=args.vcenter, show_vm_column=False)
 
     transient_failures = [r for r in results if r.status == "SETUP_FAILED"
                           and state.get(r.name, {}).get("transient")]
@@ -2563,7 +2609,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             with results_lock:
                 results.append(result)
                 write_report(results, report_path, start_time=run_start,
-                             title="OVF Deploy with VM Service")
+                             title="OVF Deploy with VM Service",
+                             vcenter_ip=args.vcenter)
 
         def deploy_one(entry: OvfEntry, vc: VCenterClient, sv: SupervisorClient) -> None:
             """Process a single OVF entry using the provided clients."""
@@ -2744,7 +2791,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 deploy_one(entry, vcenter, supervisor)
 
         write_report(results, report_path, start_time=run_start,
-                     title="OVF Deploy with VM Service")  # final write also prints summary to stdout
+                     title="OVF Deploy with VM Service",
+                     vcenter_ip=args.vcenter)  # final write also prints summary to stdout
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
 
     except Exception as e:
@@ -2781,7 +2829,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         with results_lock:
             results.append(result)
             write_report(results, report_path, start_time=run_start,
-                         title="OVF Deploy with Content Library")
+                         title="OVF Deploy with Content Library",
+                         vcenter_ip=args.vcenter)
 
     vcenter: Optional[VCenterClient] = None
     try:
@@ -2915,7 +2964,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 validate_one(entry, vcenter)
 
         write_report(results, report_path, start_time=run_start,
-                     title="OVF Deploy with Content Library")
+                     title="OVF Deploy with Content Library",
+                     vcenter_ip=args.vcenter)
         return 1 if any(r.status in ("FAILED", "SETUP_FAILED") for r in results) else 0
 
     except Exception as e:
