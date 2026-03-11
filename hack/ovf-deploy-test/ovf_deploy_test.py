@@ -680,7 +680,7 @@ class VCenterClient:
         """Power off and delete a VM by its vSphere VM ID (best-effort)."""
         try:
             self.rest_session.post(
-                f"https://{self.host}/api/vcenter/vm/{vm_id}/power?action=stop"
+                f"https://{self.host}/api/vcenter/vm/{vm_id}/power?action=stop&force=true"
             )
         except Exception:
             pass
@@ -717,7 +717,7 @@ class VCenterClient:
                             WaitForTask(obj.PowerOff(force=True))
                     else:
                         if obj.runtime.powerState != _vim.VirtualMachinePowerState.poweredOff:
-                            WaitForTask(obj.PowerOff())
+                            WaitForTask(obj.PowerOff(force=True))
                 except Exception as e:
                     print(f"  Warning: could not power off '{name}': {e}")
                 try:
@@ -1686,6 +1686,7 @@ class SupervisorClient:
             "imageName": image_name,
             "storageClass": storage_class,
             "powerState": "PoweredOn",
+            "powerOffMode": "Hard",
         }
         if not (ovf_info and ovf_info.guest_id):
             spec["guestID"] = "vmwarePhoton64Guest"
