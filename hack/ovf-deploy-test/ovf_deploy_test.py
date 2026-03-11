@@ -72,8 +72,8 @@ STORAGE_CLASS = "wcpglobal-storage-profile"
 
 
 # Timeouts
-VMI_WAIT_TIMEOUT = 600  # 5 minutes
-VM_TOOLS_WAIT_TIMEOUT = 600  # 5 minutes
+VMI_WAIT_TIMEOUT = 600  # 10 minutes
+VM_TOOLS_WAIT_TIMEOUT = 600  # 10 minutes
 POLL_INTERVAL = 10  # seconds
 
 class UntrustedSourceError(RuntimeError):
@@ -103,6 +103,7 @@ class OvfProperty:
     user_configurable: bool
     label: str
     description: str
+    qualifiers: str = ""  # vmw:qualifiers e.g. "Ip('Network 1')", "Netmask('Network 1')"
 
 
 @dataclass
@@ -162,21 +163,32 @@ def parse_ovf(ovf_content: str) -> OvfInfo:
         desc = desc_el.text if desc_el is not None else ""
         info.networks.append(OvfNetwork(name=net_name, description=desc))
 
-    # Parse ProductSection properties
-    for prop in root.findall(f".//{{{OVF_NS}}}ProductSection/{{{OVF_NS}}}Property"):
-        key = prop.get(f"{{{OVF_NS}}}key", "")
-        typ = prop.get(f"{{{OVF_NS}}}type", "string")
-        default = prop.get(f"{{{OVF_NS}}}value", "")
-        user_configurable = prop.get(f"{{{OVF_NS}}}userConfigurable", "false").lower() == "true"
-        label_el = prop.find(f"{{{OVF_NS}}}Label")
-        label = label_el.text if label_el is not None else key
-        desc_el = prop.find(f"{{{OVF_NS}}}Description")
-        desc = desc_el.text if desc_el is not None else ""
-        info.properties.append(OvfProperty(
-            key=key, type=typ, default=default,
-            user_configurable=user_configurable,
-            label=label, description=desc
-        ))
+    # Parse ProductSection properties.
+    # When a ProductSection has ovf:class and ovf:instance (vAMI convention),
+    # vCenter composes the effective property key as "{class}.{bare_key}.{instance}".
+    for section in root.findall(f".//{{{OVF_NS}}}ProductSection"):
+        cls = section.get(f"{{{OVF_NS}}}class", "")
+        instance = section.get(f"{{{OVF_NS}}}instance", "")
+        for prop in section.findall(f"{{{OVF_NS}}}Property"):
+            bare_key = prop.get(f"{{{OVF_NS}}}key", "")
+            if cls and instance:
+                key = f"{cls}.{bare_key}.{instance}"
+            else:
+                key = bare_key
+            typ = prop.get(f"{{{OVF_NS}}}type", "string")
+            default = prop.get(f"{{{OVF_NS}}}value", "")
+            user_configurable = prop.get(f"{{{OVF_NS}}}userConfigurable", "false").lower() == "true"
+            qualifiers = prop.get(f"{{{VMW_NS}}}qualifiers", "")
+            label_el = prop.find(f"{{{OVF_NS}}}Label")
+            label = label_el.text if label_el is not None else key
+            desc_el = prop.find(f"{{{OVF_NS}}}Description")
+            desc = desc_el.text if desc_el is not None else ""
+            info.properties.append(OvfProperty(
+                key=key, type=typ, default=default,
+                user_configurable=user_configurable,
+                label=label, description=desc,
+                qualifiers=qualifiers,
+            ))
 
     return info
 
@@ -866,7 +878,7 @@ class VCenterClient:
     def find_content_library(self, name: str) -> Optional[str]:
         """Find a content library by name and return its ID."""
         url = f"https://{self.host}/api/content/library"
-        
+
         # Retry on 503 Service Unavailable
         for attempt in range(5):
             response = self.rest_session.get(url)
@@ -907,7 +919,7 @@ class VCenterClient:
             "name": item_name,
             "library_id": library_id,
         }
-        
+
         # Retry on 503 Service Unavailable
         for attempt in range(5):
             response = self.rest_session.post(find_url, json=find_spec)
@@ -928,13 +940,13 @@ class VCenterClient:
         # Fetch details for the first matching item to get size
         item_id = item_ids[0]
         item_url = f"https://{self.host}/api/content/library/item/{item_id}"
-        
+
         for attempt in range(3):
             item_response = self.rest_session.get(item_url)
             if item_response.status_code != 503:
                 break
             time.sleep(5)
-            
+
         if item_response.status_code == 404:
             return None
         item_response.raise_for_status()
@@ -1024,14 +1036,14 @@ class VCenterClient:
         # Try upload up to 2 times: first attempt, then retry after trusting cert if needed
         cert_trusted = False
         last_error: Optional[Exception] = None
-        
+
         for attempt in range(2):
             item_id = None
             session_id = None
             try:
                 # Create library item
                 item_id = self._create_library_item(library_id, item_name)
-                
+
                 # Create update session
                 session_id = self._create_update_session(item_id)
 
@@ -1043,14 +1055,14 @@ class VCenterClient:
 
                 # Complete the session
                 self._complete_update_session(session_id)
-                
+
                 print("  Upload completed successfully")
                 return item_id
 
             except UntrustedSourceError as e:
                 last_error = e
                 self._cleanup_failed_upload(session_id, item_id)
-                
+
                 # Only try to trust cert on first attempt
                 if attempt == 0 and not cert_trusted:
                     print("  Source TLS certificate not trusted — attempting to add to vCenter trust store...")
@@ -1079,7 +1091,7 @@ class VCenterClient:
             "type": "ovf"
         }
         create_url = f"https://{self.host}/api/content/library/item"
-        
+
         for attempt in range(3):
             response = self.rest_session.post(create_url, json=create_spec)
             if response.status_code != 503:
@@ -1088,11 +1100,11 @@ class VCenterClient:
             wait = 10 * (attempt + 1)
             print(f"  Content library service unavailable (503): {error_msg[:100]}... retrying in {wait}s")
             time.sleep(wait)
-        
+
         if not response.ok:
             error_msg = self._extract_error_message(response)
             raise RuntimeError(f"Failed to create library item: {response.status_code} — {error_msg}")
-        
+
         item_id = response.json()
         print(f"  Created library item with ID: {item_id}")
         return item_id
@@ -1102,13 +1114,13 @@ class VCenterClient:
         session_spec = {"library_item_id": item_id}
         session_url = f"https://{self.host}/api/content/library/item/update-session"
         response = self.rest_session.post(session_url, json=session_spec)
-        
+
         if not response.ok:
             raise RuntimeError(
                 f"Failed to create update session: "
                 f"{response.status_code} {response.reason}\n{response.text}"
             )
-        
+
         session_id = response.json()
         print(f"  Created update session: {session_id}")
         return session_id
@@ -2026,6 +2038,22 @@ def _smart_value_for_property(prop: OvfProperty, for_vcenter: bool = False) -> s
     desc = prop.description.lower()
     combined = f"{key} {label} {desc}"
     typ = prop.type.lower()
+    qualifiers = prop.qualifiers.lower() if prop.qualifiers else ""
+
+    # --- vmw:qualifiers-based rules (most authoritative signal) ---
+    # e.g. Ip('Network 1'), Netmask('Network 1'), Gateway('Network 1'), Dns('Network 1')
+    if qualifiers.startswith("ip("):
+        return "192.0.2.1" if for_vcenter else \
+            '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
+    if qualifiers.startswith("netmask("):
+        return "255.255.255.0" if for_vcenter else \
+            '{{ V1alpha6_SubnetMask (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
+    if qualifiers.startswith("gateway("):
+        return "192.0.2.254" if for_vcenter else \
+            "{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}"
+    if qualifiers.startswith("dns("):
+        return "8.8.8.8" if for_vcenter else \
+            '{{ V1alpha6_FormatNameservers -1 "," }}'
 
     # --- OVF type-based rules ---
     if typ == "boolean":
@@ -2077,20 +2105,21 @@ def _smart_value_for_property(prop: OvfProperty, for_vcenter: bool = False) -> s
         return "255.255.255.0" if for_vcenter else \
             '{{ V1alpha6_SubnetMask (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
 
-    # IP address (but not gateway/dns)
-    if any(x in combined for x in ("ip address", "ip_address", "ipaddress", "net.addr",
+    # IP address (but not gateway/dns) — also matches short keys like "ip0", "ip1"
+    if (any(x in combined for x in ("ip address", "ip_address", "ipaddress", "net.addr",
                                     "net_addr", "nsx_ip", "mgmt_ip", "management ip",
-                                    "pnid", "hostname")) and \
-       not any(x in combined for x in ("gateway", "dns", "nameserver")):
+                                    "pnid", "hostname")) or
+            re.search(r'\bip\d*\b', key)) and \
+       not any(x in combined for x in ("gateway", "dns", "nameserver", "netmask", "subnet")):
         return "192.0.2.1" if for_vcenter else \
             '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
 
-    # Gateway
+    # Gateway — also matches "gateway0", "gateway1"
     if any(x in combined for x in ("gateway", "default route", "net.gateway", "net_gateway")):
         return "192.0.2.254" if for_vcenter else \
             "{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}"
 
-    # DNS / nameservers
+    # DNS / nameservers — also matches "dns0", "DNS0"
     if any(x in combined for x in ("dns", "nameserver", "name server", "net.dns")):
         return "8.8.8.8" if for_vcenter else \
             '{{ V1alpha6_FormatNameservers -1 "," }}'
@@ -2876,11 +2905,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 ))
 
             finally:
-                if vm_created:
+                if vm_created and not args.no_cleanup_vm:
                     try:
                         sv.delete_vm(args.namespace, vm_name)
                     except Exception as e:
                         print(f"  Warning: VM deletion failed: {e}")
+                elif vm_created and args.no_cleanup_vm:
+                    print(f"  VM '{vm_name}' left running for inspection (--no-cleanup-vm)")
                 if args.cleanup and not args.no_cleanup_cl:
                     try:
                         cl_item = vc.find_library_item(library_id, item_name)
@@ -3069,10 +3100,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 ))
             finally:
                 if resource_id:
-                    if resource_type == "VirtualApp":
-                        vc.delete_vapp_by_id(resource_id)
+                    if not args.no_cleanup_vm:
+                        if resource_type == "VirtualApp":
+                            vc.delete_vapp_by_id(resource_id)
+                        else:
+                            vc.delete_vm_by_id(resource_id)
                     else:
-                        vc.delete_vm_by_id(resource_id)
+                        print(f"  VM/vApp '{vm_name}' left running for inspection (--no-cleanup-vm)")
                 if args.cleanup:
                     # In --cleanup mode, delete the CL item we uploaded inline
                     try:
@@ -3191,6 +3225,11 @@ def main() -> int:
         help="When --cleanup is set, skip deleting the content library item"
     )
     p_deploy.add_argument(
+        "--no-cleanup-vm",
+        action="store_true",
+        help="Leave VMs running after the test instead of deleting them (useful for inspection)"
+    )
+    p_deploy.add_argument(
         "--skip-vapps",
         action="store_true",
         help="Skip multi-VM vApp OVFs (VirtualSystemCollection) instead of attempting deployment"
@@ -3284,6 +3323,11 @@ def main() -> int:
         "--cleanup",
         action="store_true",
         help="Upload OVFs inline and delete CL item after test (default: use pre-populated CL from 'setup')"
+    )
+    p_validate.add_argument(
+        "--no-cleanup-vm",
+        action="store_true",
+        help="Leave VMs running after the test instead of deleting them (useful for inspection)"
     )
 
     args = parser.parse_args()
