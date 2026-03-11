@@ -121,6 +121,7 @@ class OvfInfo:
     properties: list[OvfProperty] = field(default_factory=list)
     is_vapp: bool = False
     guest_id: str = ""  # OVF OperatingSystemSection osType, empty if not specified
+    has_buslogic: bool = False  # True if OVF has a BusLogic SCSI controller
 
     def has_properties(self) -> bool:
         return len(self.properties) > 0
@@ -155,6 +156,17 @@ def parse_ovf(ovf_content: str) -> OvfInfo:
     if os_section is not None:
         # osType attribute holds the VMware guest OS identifier (e.g. "vmwarePhoton64Guest")
         info.guest_id = os_section.get(f"{{{VMW_NS}}}osType", "")
+
+    # Detect BusLogic SCSI controller (ResourceType=6, ResourceSubType=buslogic).
+    # VMs with BusLogic controllers are always 32-bit guests; VM Service must not
+    # override guestID to a 64-bit value for them.
+    for item in root.findall(f".//{{{OVF_NS}}}VirtualHardwareSection//{{{RASD_NS}}}Item") + \
+                root.findall(f".//{{{RASD_NS}}}Item"):
+        res_type = item.findtext(f"{{{RASD_NS}}}ResourceType", "")
+        res_subtype = item.findtext(f"{{{RASD_NS}}}ResourceSubType", "").lower()
+        if res_type == "6" and "buslogic" in res_subtype:
+            info.has_buslogic = True
+            break
 
     # Parse NetworkSection
     for net in root.findall(f".//{{{OVF_NS}}}NetworkSection/{{{OVF_NS}}}Network"):
@@ -1689,7 +1701,12 @@ class SupervisorClient:
             "powerOffMode": "Hard",
         }
         if not (ovf_info and ovf_info.guest_id):
-            spec["guestID"] = "vmwarePhoton64Guest"
+            if ovf_info and ovf_info.has_buslogic:
+                # BusLogic controller implies a 32-bit guest; let VM Service infer
+                # the guestID from the image rather than forcing a 64-bit default.
+                print("  OVF has BusLogic SCSI controller — skipping guestID override")
+            else:
+                spec["guestID"] = "vmwarePhoton64Guest"
 
         # Add network interfaces from OVF network definitions
         if ovf_info and ovf_info.has_networks():
@@ -3216,7 +3233,7 @@ def main() -> int:
         help="Network type: 'nsx' (SubnetSet) or 'vds' (Network) (default: nsx)"
     )
     p_deploy.add_argument(
-        "--cleanup",
+        "--cleanup", "--clean-up",
         action="store_true",
         help="Delete each VM after deployment (errors ignored)"
     )
@@ -3321,7 +3338,7 @@ def main() -> int:
         help="Path to write the results report (default: <csv>.with-cl.report.html)"
     )
     p_validate.add_argument(
-        "--cleanup",
+        "--cleanup", "--clean-up",
         action="store_true",
         help="Upload OVFs inline and delete CL item after test (default: use pre-populated CL from 'setup')"
     )
