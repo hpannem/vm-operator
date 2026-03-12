@@ -72,8 +72,8 @@ STORAGE_CLASS = "wcpglobal-storage-profile"
 
 
 # Timeouts
-VMI_WAIT_TIMEOUT = 600  # 10 minutes
-VM_TOOLS_WAIT_TIMEOUT = 600  # 10 minutes
+VMI_WAIT_TIMEOUT = 100  # 10 minutes
+VM_TOOLS_WAIT_TIMEOUT = 100  # 10 minutes
 POLL_INTERVAL = 10  # seconds
 
 class UntrustedSourceError(RuntimeError):
