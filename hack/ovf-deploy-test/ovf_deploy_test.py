@@ -1700,13 +1700,14 @@ class SupervisorClient:
             "powerState": "PoweredOn",
             "powerOffMode": "Hard",
         }
-        if not (ovf_info and ovf_info.guest_id):
-            if ovf_info and ovf_info.has_buslogic:
-                # BusLogic controller implies a 32-bit guest; let VM Service infer
-                # the guestID from the image rather than forcing a 64-bit default.
-                print("  OVF has BusLogic SCSI controller — skipping guestID override")
-            else:
-                spec["guestID"] = "vmwarePhoton64Guest"
+        # Comment out the guestid
+        # if not (ovf_info and ovf_info.guest_id):
+        #     if ovf_info and ovf_info.has_buslogic:
+        #         # BusLogic controller implies a 32-bit guest; let VM Service infer
+        #         # the guestID from the image rather than forcing a 64-bit default.
+        #         print("  OVF has BusLogic SCSI controller — skipping guestID override")
+        #     else:
+        #         spec["guestID"] = "vmwarePhoton64Guest"
 
         # Add network interfaces from OVF network definitions
         if ovf_info and ovf_info.has_networks():
