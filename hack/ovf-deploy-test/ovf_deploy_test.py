@@ -88,10 +88,22 @@ class SetupError(RuntimeError):
     """
 
 
-# OVF XML namespaces
-OVF_NS = "http://schemas.dmtf.org/ovf/envelope/1"
-VMW_NS = "http://www.vmware.com/schema/ovf"
-RASD_NS = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+# OVF XML namespaces — OVF 1.x (DMTF) and OVF 0.9 (VMware legacy)
+OVF_NS   = "http://schemas.dmtf.org/ovf/envelope/1"
+OVF09_NS = "http://www.vmware.com/schema/ovf/1/envelope"
+VMW_NS   = "http://www.vmware.com/schema/ovf"
+RASD_NS  = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+
+# OVF 0.9 xsi:type values that identify OS and hardware sections
+_OVF09_OS_TYPE   = "ovf:OperatingSystemSection_Type"
+_OVF09_VHW_TYPE  = "ovf:VirtualHardwareSection_Type"
+
+# Map of OVF 0.9 Description text substrings → vmw:osType equivalents
+# Used as a fallback when vmw:osType is absent (OVF 0.9 schema).
+_OVF09_OS_DESC_MAP = [
+    ("32-bit", "otherLinuxGuest"),
+    ("64-bit", "otherLinux64Guest"),
+]
 
 
 @dataclass
@@ -142,6 +154,9 @@ def parse_ovf(ovf_content: str) -> OvfInfo:
     """
     root = ET.fromstring(ovf_content)
 
+    # Detect OVF schema version from root namespace
+    is_ovf09 = root.tag.startswith(f"{{{OVF09_NS}}}")
+
     # A vApp envelope has VirtualSystemCollection as the top-level content element.
     is_vapp = root.find(f"{{{OVF_NS}}}VirtualSystemCollection") is not None
 
@@ -151,19 +166,51 @@ def parse_ovf(ovf_content: str) -> OvfInfo:
 
     info = OvfInfo(name=name, is_vapp=is_vapp)
 
-    # Parse OperatingSystemSection for guestId
+    # Parse OperatingSystemSection for guestId.
+    # OVF 1.x: <OperatingSystemSection vmw:osType="..."> — prefer vmw:osType attribute,
+    #           fall back to Description text if attribute absent.
+    # OVF 0.9: <Section xsi:type="ovf:OperatingSystemSection_Type"><Description>...</Description>
     os_section = root.find(f".//{{{OVF_NS}}}OperatingSystemSection")
     if os_section is not None:
-        # osType attribute holds the VMware guest OS identifier (e.g. "vmwarePhoton64Guest")
         info.guest_id = os_section.get(f"{{{VMW_NS}}}osType", "")
+        if not info.guest_id:
+            # No vmw:osType — derive from Description text (e.g. "Other Linux (32-bit)")
+            desc_el = os_section.find(f"{{{OVF_NS}}}Description")
+            if desc_el is None:
+                desc_el = os_section.find("Description")
+            desc_text = (desc_el.text or "").lower() if desc_el is not None else ""
+            for substr, guest_id in _OVF09_OS_DESC_MAP:
+                if substr in desc_text:
+                    info.guest_id = guest_id
+                    break
+    elif is_ovf09:
+        # OVF 0.9: find Section with xsi:type containing OperatingSystemSection_Type
+        xsi_type_attr = "{http://www.w3.org/2001/XMLSchema-instance}type"
+        for section in root.iter():
+            if section.get(xsi_type_attr, "") == _OVF09_OS_TYPE:
+                desc_el = section.find("Description")
+                if desc_el is None:
+                    # Description may be unnamespaced or under OVF09_NS
+                    desc_el = section.find(f"{{{OVF09_NS}}}Description")
+                desc_text = (desc_el.text or "").lower() if desc_el is not None else ""
+                for substr, guest_id in _OVF09_OS_DESC_MAP:
+                    if substr in desc_text:
+                        info.guest_id = guest_id
+                        break
+                break
 
     # Detect BusLogic SCSI controller (ResourceType=6, ResourceSubType=buslogic).
-    # VMs with BusLogic controllers are always 32-bit guests; VM Service must not
-    # override guestID to a 64-bit value for them.
-    for item in root.findall(f".//{{{OVF_NS}}}VirtualHardwareSection//{{{RASD_NS}}}Item") + \
-                root.findall(f".//{{{RASD_NS}}}Item"):
-        res_type = item.findtext(f"{{{RASD_NS}}}ResourceType", "")
-        res_subtype = item.findtext(f"{{{RASD_NS}}}ResourceSubType", "").lower()
+    # Item elements appear in the OVF namespace, RASD namespace, or OVF 0.9 namespace
+    # depending on the OVF producer and schema version.
+    for item in (root.findall(f".//{{{OVF_NS}}}Item") +
+                 root.findall(f".//{{{RASD_NS}}}Item") +
+                 root.findall(f".//{{{OVF09_NS}}}Item") +
+                 root.findall(".//Item")):
+        # Children may use RASD_NS or a local alias — check both
+        res_type = (item.findtext(f"{{{RASD_NS}}}ResourceType", "") or
+                    item.findtext("ResourceType", ""))
+        res_subtype = (item.findtext(f"{{{RASD_NS}}}ResourceSubType", "") or
+                       item.findtext("ResourceSubType", "")).lower()
         if res_type == "6" and "buslogic" in res_subtype:
             info.has_buslogic = True
             break
@@ -1698,16 +1745,14 @@ class SupervisorClient:
             "imageName": image_name,
             "storageClass": storage_class,
             "powerState": "PoweredOn",
-            "powerOffMode": "Hard",
+            "powerOffMode": "Soft",
         }
-        # Comment out the guestid
-        # if not (ovf_info and ovf_info.guest_id):
-        #     if ovf_info and ovf_info.has_buslogic:
-        #         # BusLogic controller implies a 32-bit guest; let VM Service infer
-        #         # the guestID from the image rather than forcing a 64-bit default.
-        #         print("  OVF has BusLogic SCSI controller — skipping guestID override")
-        #     else:
-        #         spec["guestID"] = "vmwarePhoton64Guest"
+
+        if not (ovf_info and ovf_info.guest_id):
+            if ovf_info and ovf_info.has_buslogic:
+                print("  OVF has BusLogic SCSI controller — skipping guestID override")
+            else:
+                spec["guestID"] = "otherLinux64Guest"
 
         # Add network interfaces from OVF network definitions
         if ovf_info and ovf_info.has_networks():
