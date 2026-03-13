@@ -1744,8 +1744,7 @@ class SupervisorClient:
             "className": vm_class,
             "imageName": image_name,
             "storageClass": storage_class,
-            "powerState": "PoweredOn",
-            "powerOffMode": "TrySoft",
+            "powerState": "PoweredOn"
         }
 
         if not (ovf_info and ovf_info.guest_id):
