@@ -1745,7 +1745,7 @@ class SupervisorClient:
             "imageName": image_name,
             "storageClass": storage_class,
             "powerState": "PoweredOn",
-            "powerOffMode": "Soft",
+            "powerOffMode": "TrySoft",
         }
 
         if not (ovf_info and ovf_info.guest_id):
