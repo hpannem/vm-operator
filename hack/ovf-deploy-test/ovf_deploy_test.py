@@ -934,6 +934,440 @@ class VCenterClient:
 
         return None
 
+    # ------------------------------------------------------------------ #
+    # Infrastructure setup helpers (used by cmd_setup_infra)             #
+    # ------------------------------------------------------------------ #
+
+    def _pbm_bearer_token(self) -> str:
+        """
+        Return the REST API session token used as a Bearer token for PBM SOAP calls.
+        On vCenter 9.x, PBM SOAP requires Authorization: Bearer <rest-token>.
+        """
+        return self.rest_session.headers.get("vmware-api-session-id", "")
+
+    def _pbm_soap(self, body: str) -> str:
+        """
+        Execute a PBM SOAP call using the REST session token for authentication.
+        Returns the raw response text. Raises RuntimeError on HTTP error.
+        """
+        envelope = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<soapenv:Envelope'
+            ' xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/"'
+            ' xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"'
+            ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+            ' xmlns:xsd="http://www.w3.org/2001/XMLSchema">'
+            f'<soapenv:Body>{body}</soapenv:Body>'
+            '</soapenv:Envelope>'
+        )
+        resp = self.rest_session.post(
+            f"https://{self.host}/pbm/sdk",
+            data=envelope.encode("utf-8"),
+            headers={
+                "Content-Type": "text/xml; charset=UTF-8",
+                "SOAPAction": "urn:pbm/2.0",
+                "Authorization": f"Bearer {self._pbm_bearer_token()}",
+            },
+        )
+        if resp.status_code not in (200, 500):
+            raise RuntimeError(
+                f"PBM SOAP call failed: {resp.status_code} {resp.text[:200]}"
+            )
+        if resp.status_code == 500 and "SecurityError" in resp.text:
+            raise RuntimeError("PBM authentication failed (SecurityError)")
+        return resp.text
+
+    def ensure_tag_category(self, name: str, cardinality: str = "SINGLE") -> str:
+        """
+        Return the ID of the tag category with the given name, creating it if absent.
+        cardinality: 'SINGLE' or 'MULTIPLE'.
+        On vCenter 9.x the tagging API is at /api/cis/tagging/category (not tag-category).
+        """
+        list_url = f"https://{self.host}/api/cis/tagging/category"
+        resp = self.rest_session.get(list_url)
+        resp.raise_for_status()
+        for cat_id in resp.json():
+            detail = self.rest_session.get(f"{list_url}/{cat_id}")
+            detail.raise_for_status()
+            if detail.json().get("name") == name:
+                print(f"  Tag category '{name}' already exists ({cat_id})")
+                return cat_id
+
+        # vCenter 9.x: flat body (no create_spec wrapper)
+        body = {
+            "name": name,
+            "description": "",
+            "cardinality": cardinality,
+            "associable_types": [],
+        }
+        resp = self.rest_session.post(list_url, json=body)
+        if not resp.ok:
+            raise RuntimeError(
+                f"Failed to create tag category '{name}': {resp.status_code} {resp.text}"
+            )
+        cat_id = resp.json()
+        print(f"  Created tag category '{name}' ({cat_id})")
+        return cat_id
+
+    def ensure_tag(self, category_id: str, name: str) -> str:
+        """Return the ID of the tag with the given name in the category, creating it if absent."""
+        list_url = f"https://{self.host}/api/cis/tagging/tag"
+        resp = self.rest_session.get(list_url)
+        resp.raise_for_status()
+        for tag_id in resp.json():
+            detail = self.rest_session.get(f"{list_url}/{tag_id}")
+            detail.raise_for_status()
+            d = detail.json()
+            if d.get("name") == name and d.get("category_id") == category_id:
+                print(f"  Tag '{name}' already exists ({tag_id})")
+                return tag_id
+
+        # vCenter 9.x: flat body (no create_spec wrapper)
+        body = {
+            "name": name,
+            "description": "",
+            "category_id": category_id,
+        }
+        resp = self.rest_session.post(list_url, json=body)
+        if not resp.ok:
+            raise RuntimeError(
+                f"Failed to create tag '{name}': {resp.status_code} {resp.text}"
+            )
+        tag_id = resp.json()
+        print(f"  Created tag '{name}' ({tag_id})")
+        return tag_id
+
+    def attach_tag(self, tag_id: str, obj_type: str, obj_id: str) -> None:
+        """
+        Attach a tag to a managed object (idempotent).
+        On vCenter 9.x the path is /api/cis/tagging/tag-association/{tag_id}?action=attach
+        with body {"object_id": {"id": ..., "type": ...}}.
+        """
+        import urllib.parse as _urlparse
+        encoded_tag_id = _urlparse.quote(tag_id, safe="")
+        url = f"https://{self.host}/api/cis/tagging/tag-association/{encoded_tag_id}?action=attach"
+        body = {"object_id": {"id": obj_id, "type": obj_type}}
+        resp = self.rest_session.post(url, json=body)
+        if resp.status_code == 204:
+            print(f"  Attached tag to {obj_type} {obj_id}")
+            return
+        if not resp.ok:
+            # 403 with "already" means already attached — tolerate it
+            if resp.status_code in (400, 403) and "already" in resp.text.lower():
+                print(f"  Tag already attached to {obj_type} {obj_id}")
+                return
+            raise RuntimeError(
+                f"Failed to attach tag {tag_id} to {obj_type} {obj_id}: "
+                f"{resp.status_code} {resp.text}"
+            )
+        print(f"  Attached tag to {obj_type} {obj_id}")
+
+    def ensure_nfs_datastore(self, cluster_name: str, nfs_host: str,
+                              remote_path: str, ds_name: str) -> str:
+        """
+        Mount an NFS datastore on every host in the named cluster.
+        Returns the datastore MoRef ID.
+        If the datastore already exists, returns its ID without remounting.
+        Uses NFSv4.1 with DEFAULT_INFRA_NFS_CONNECTIONS TCP connections.
+        """
+        from pyVmomi import vim as _vim
+
+        content = self.si.RetrieveContent()
+
+        # Find cluster
+        view = content.viewManager.CreateContainerView(
+            content.rootFolder, [_vim.ClusterComputeResource], True
+        )
+        try:
+            clusters = list(view.view)
+        finally:
+            view.Destroy()
+
+        cluster = next((c for c in clusters if c.name == cluster_name), None)
+        if cluster is None:
+            raise RuntimeError(f"Cluster '{cluster_name}' not found")
+
+        # Check if datastore already exists
+        ds_view = content.viewManager.CreateContainerView(
+            content.rootFolder, [_vim.Datastore], True
+        )
+        try:
+            existing_ds = next((d for d in ds_view.view if d.name == ds_name), None)
+        finally:
+            ds_view.Destroy()
+
+        if existing_ds is not None:
+            ds_id = existing_ds._moId
+            print(f"  NFS datastore '{ds_name}' already exists ({ds_id})")
+            return ds_id
+
+        # Mount on each host in the cluster
+        spec = _vim.host.NasVolume.Specification(
+            remoteHost=nfs_host,
+            remotePath=remote_path,
+            localPath=ds_name,
+            accessMode="readWrite",
+            type=DEFAULT_INFRA_NFS_TYPE,
+            connections=DEFAULT_INFRA_NFS_CONNECTIONS,
+        )
+
+        ds_id = None
+        for host in cluster.host:
+            print(f"  Mounting NFS datastore '{ds_name}' on host {host.name}...")
+            try:
+                ds = host.configManager.datastoreSystem.CreateNasDatastore(spec)
+                if ds_id is None:
+                    ds_id = ds._moId
+                print(f"    Mounted on {host.name}")
+            except _vim.fault.DuplicateName:
+                print(f"    Already mounted on {host.name}")
+                for d in host.datastore:
+                    if d.name == ds_name and ds_id is None:
+                        ds_id = d._moId
+            except Exception as e:
+                print(f"    Warning: could not mount on {host.name}: {e}")
+
+        if ds_id is None:
+            # Last resort: search again after mounting attempts
+            ds_view2 = content.viewManager.CreateContainerView(
+                content.rootFolder, [_vim.Datastore], True
+            )
+            try:
+                found = next((d for d in ds_view2.view if d.name == ds_name), None)
+            finally:
+                ds_view2.Destroy()
+            if found:
+                ds_id = found._moId
+            else:
+                raise RuntimeError(
+                    f"NFS datastore '{ds_name}' could not be mounted on any host"
+                )
+
+        print(f"  NFS datastore '{ds_name}' ready ({ds_id})")
+        return ds_id
+
+    def ensure_storage_policy(self, policy_name: str, tag_category_name: str,
+                               tag_name: str) -> str:
+        """
+        Create a VM storage policy that selects datastores tagged with the given tag.
+        Returns the policy ID. If a policy with the same name already exists, returns its ID.
+
+        Uses PBM SOAP (the only supported creation path) authenticated via the REST
+        session token as a Bearer token (required on vCenter 9.x).
+        """
+        # Check if policy already exists via REST (list only)
+        list_url = f"https://{self.host}/api/vcenter/storage/policies"
+        resp = self.rest_session.get(list_url)
+        resp.raise_for_status()
+        for p in resp.json():
+            if p.get("name") == policy_name:
+                pid = p.get("policy")
+                print(f"  Storage policy '{policy_name}' already exists ({pid})")
+                return pid
+
+        # Build PBM SOAP create call.
+        # The tag-based capability uses namespace http://www.vmware.com/storage/tag
+        # and capability ID equal to the tag category name.
+        prop_id = f"com.vmware.storage.tag.{tag_category_name}.property"
+        soap_body = (
+            f'<PbmCreate xmlns="urn:pbm">'
+            f'<_this versionId="2.0" type="PbmProfileProfileManager">ProfileManager</_this>'
+            f'<createSpec xsi:type="pbm:PbmCapabilityProfileCreateSpec">'
+            f'<name>{policy_name}</name>'
+            f'<description>Tag-based policy selecting datastores tagged {tag_name!r}</description>'
+            f'<resourceType><resourceType>STORAGE</resourceType></resourceType>'
+            f'<constraints xsi:type="pbm:PbmCapabilitySubProfileConstraints">'
+            f'<subProfiles>'
+            f'<name>Tag based placement</name>'
+            f'<capability>'
+            f'<id>'
+            f'<namespace>http://www.vmware.com/storage/tag</namespace>'
+            f'<id>{tag_category_name}</id>'
+            f'</id>'
+            f'<constraint>'
+            f'<propertyInstance>'
+            f'<id>{prop_id}</id>'
+            f'<value xsi:type="pbm:PbmCapabilityDiscreteSet">'
+            f'<values xsi:type="xsd:string">{tag_name}</values>'
+            f'</value>'
+            f'</propertyInstance>'
+            f'</constraint>'
+            f'</capability>'
+            f'</subProfiles>'
+            f'</constraints>'
+            f'</createSpec>'
+            f'</PbmCreate>'
+        )
+        resp_text = self._pbm_soap(soap_body)
+        if "Fault" in resp_text:
+            raise RuntimeError(
+                f"PBM failed to create storage policy '{policy_name}': {resp_text[:400]}"
+            )
+
+        # Extract the new policy ID from the response
+        import xml.etree.ElementTree as _ET
+        root = _ET.fromstring(resp_text)
+        uid_el = root.find(".//{urn:pbm}uniqueId")
+        if uid_el is None:
+            uid_el = root.find(".//{urn:pbm}returnval/{urn:pbm}uniqueId")
+        if uid_el is None:
+            # Try without namespace
+            uid_el = root.find(".//uniqueId")
+        pid = uid_el.text if uid_el is not None else "unknown"
+        print(f"  Created storage policy '{policy_name}' ({pid})")
+        return pid
+
+    def ensure_local_content_library(self, name: str, datastore_id: str) -> str:
+        """
+        Create a local content library backed by the given datastore.
+        Returns the library ID. If a library with the same name already exists, returns its ID.
+        """
+        existing = self.find_content_library(name)
+        if existing:
+            return existing
+
+        body = {
+            "name": name,
+            "description": "OVF test content library",
+            "type": "LOCAL",
+            "storage_backings": [
+                {
+                    "type": "DATASTORE",
+                    "datastore_id": datastore_id,
+                }
+            ],
+        }
+        url = f"https://{self.host}/api/content/local-library"
+        resp = self.rest_session.post(url, json=body)
+        if not resp.ok:
+            raise RuntimeError(
+                f"Failed to create content library '{name}': {resp.status_code} {resp.text}"
+            )
+        lib_id = resp.json()
+        print(f"  Created content library '{name}' ({lib_id})")
+        return lib_id
+
+    def set_content_library_max_concurrent_syncs(self, max_syncs: int) -> None:
+        """
+        Set the global 'Library Maximum Concurrent Sync Items' vCenter configuration.
+        Controls how many library items can be concurrently synchronized to a subscriber.
+        """
+        url = f"https://{self.host}/api/content/configuration"
+        body = {"maximum_concurrent_item_syncs": max_syncs}
+        resp = self.rest_session.patch(url, json=body)
+        if not resp.ok:
+            raise RuntimeError(
+                f"Failed to set content library max concurrent syncs: {resp.status_code} {resp.text}"
+            )
+        print(f"  Content library max concurrent sync items set to {max_syncs}")
+
+    def ensure_supervisor_namespace(self, namespace: str, cluster_id: str,
+                                     storage_policy_id: str, vm_class_name: str,
+                                     library_id: str) -> None:
+        """
+        Create a Supervisor namespace with the given storage policy, VM class, and
+        content library assigned. Idempotent — updates assignments if namespace exists.
+
+        On vCenter 9.x, content_libraries in vm_service_spec is a list of string IDs.
+        """
+        ns_url = f"https://{self.host}/api/vcenter/namespaces/instances/{namespace}"
+        resp = self.rest_session.get(ns_url)
+
+        if resp.status_code == 404:
+            body = {
+                "namespace": namespace,
+                "cluster": cluster_id,
+                "storage_specs": [{"policy": storage_policy_id}],
+                "vm_service_spec": {
+                    "vm_classes": [vm_class_name],
+                    "content_libraries": [library_id],
+                },
+            }
+            create_url = f"https://{self.host}/api/vcenter/namespaces/instances"
+            r = self.rest_session.post(create_url, json=body)
+            if not r.ok:
+                raise RuntimeError(
+                    f"Failed to create namespace '{namespace}': {r.status_code} {r.text}"
+                )
+            print(f"  Created namespace '{namespace}'")
+        elif resp.ok:
+            existing = resp.json()
+            # Check if everything is already assigned correctly
+            existing_policies = {s.get("policy") for s in existing.get("storage_specs", [])}
+            existing_classes = set(existing.get("vm_service_spec", {}).get("vm_classes", []))
+            existing_libs = set(existing.get("vm_service_spec", {}).get("content_libraries", []))
+
+            needs_update = (
+                storage_policy_id not in existing_policies
+                or vm_class_name not in existing_classes
+                or library_id not in existing_libs
+            )
+            if not needs_update:
+                print(f"  Namespace '{namespace}' already has all required assignments")
+                return
+
+            print(f"  Namespace '{namespace}' exists — updating assignments")
+            # Merge: keep existing assignments and add ours
+            all_policies = list(existing_policies | {storage_policy_id})
+            all_classes = sorted(existing_classes | {vm_class_name})
+            all_libs = sorted(existing_libs | {library_id})
+
+            patch_body = {
+                "storage_specs": [{"policy": p} for p in all_policies],
+                "vm_service_spec": {
+                    "vm_classes": all_classes,
+                    "content_libraries": all_libs,
+                },
+            }
+            r = self.rest_session.patch(ns_url, json=patch_body)
+            if not r.ok:
+                raise RuntimeError(
+                    f"Failed to update namespace '{namespace}': {r.status_code} {r.text}"
+                )
+            print(f"  Updated namespace '{namespace}' assignments")
+        else:
+            raise RuntimeError(
+                f"Failed to query namespace '{namespace}': {resp.status_code} {resp.text}"
+            )
+
+    def get_supervisor_cluster_id(self, cluster_name: str) -> str:
+        """Return the vSphere cluster MoRef ID for the named cluster."""
+        from pyVmomi import vim as _vim
+        content = self.si.RetrieveContent()
+        view = content.viewManager.CreateContainerView(
+            content.rootFolder, [_vim.ClusterComputeResource], True
+        )
+        try:
+            clusters = list(view.view)
+        finally:
+            view.Destroy()
+        cluster = next((c for c in clusters if c.name == cluster_name), None)
+        if cluster is None:
+            raise RuntimeError(f"Cluster '{cluster_name}' not found")
+        return cluster._moId
+
+    def get_default_datastore_id(self, cluster_name: str) -> str:
+        """Return the MoRef ID of the first accessible non-vSAN datastore in the cluster."""
+        from pyVmomi import vim as _vim
+        content = self.si.RetrieveContent()
+        view = content.viewManager.CreateContainerView(
+            content.rootFolder, [_vim.ClusterComputeResource], True
+        )
+        try:
+            clusters = list(view.view)
+        finally:
+            view.Destroy()
+        cluster = next((c for c in clusters if c.name == cluster_name), None)
+        if cluster is None:
+            raise RuntimeError(f"Cluster '{cluster_name}' not found")
+        candidates = [
+            d for d in cluster.datastore
+            if d.summary.accessible and d.summary.type not in ("vsan", "VSAN", "vVol")
+        ]
+        if not candidates:
+            raise RuntimeError(f"No accessible non-vSAN datastore found in cluster '{cluster_name}'")
+        return candidates[0]._moId
+
     def find_content_library(self, name: str) -> Optional[str]:
         """Find a content library by name and return its ID."""
         url = f"https://{self.host}/api/content/library"
@@ -2570,6 +3004,106 @@ def _load_setup_state(csv_path: str, vcenter: str, content_library: str) -> dict
         return {}
 
 
+DEFAULT_INFRA_TAG_CATEGORY = "ds"
+DEFAULT_INFRA_TAG_NAME = "largedatastore"
+DEFAULT_INFRA_DS_NAME = "nfsdatastore"
+DEFAULT_INFRA_NFS_PATH = "/exports/nfsdatastore"
+DEFAULT_INFRA_NFS_TYPE = "NFS41"
+DEFAULT_INFRA_NFS_CONNECTIONS = 4
+DEFAULT_INFRA_CL_MAX_CONCURRENT_SYNCS = 10
+DEFAULT_INFRA_STORAGE_POLICY = "ovftest-policy"
+DEFAULT_INFRA_NAMESPACE = DEFAULT_NAMESPACE
+DEFAULT_INFRA_CONTENT_LIBRARY = DEFAULT_CONTENT_LIBRARY
+DEFAULT_INFRA_VM_CLASS = DEFAULT_VM_CLASS
+
+
+def cmd_setup_infra(args: argparse.Namespace) -> int:
+    """
+    Provision the vSphere infrastructure required for OVF deploy tests:
+
+      1. Create tag category and tag for datastore classification
+      2. Mount an NFS datastore on all hosts in the cluster
+      3. Tag the datastore
+      4. Create a VM storage policy selecting that tag
+      5. Create a local content library
+      6. Create a Supervisor namespace
+      7-9. Assign storage policy, VM class, and content library to the namespace
+
+    All steps are idempotent — already-existing objects are left unchanged.
+    """
+    vcenter = VCenterClient(
+        args.vcenter, args.vcenter_user,
+        args.vcenter_password,
+    )
+    try:
+        vcenter.connect(ssh=False)
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    try:
+        cluster_name = args.cluster
+        nfs_ip = args.nfs_ip
+        tag_category = args.tag_category
+        tag_name = args.tag_name
+        ds_name = args.datastore_name
+        nfs_path = args.nfs_path
+        policy_name = args.storage_policy
+        library_name = args.content_library
+        namespace = args.namespace
+        vm_class = args.vm_class
+
+        print("\n=== Step 1: Ensure tag category and tag ===")
+        cat_id = vcenter.ensure_tag_category(tag_category)
+        tag_id = vcenter.ensure_tag(cat_id, tag_name)
+
+        print("\n=== Step 2: Mount NFS datastore ===")
+        ds_id = vcenter.ensure_nfs_datastore(cluster_name, nfs_ip, nfs_path, ds_name)
+
+        print("\n=== Step 3: Tag the datastore ===")
+        vcenter.attach_tag(tag_id, "Datastore", ds_id)
+
+        print("\n=== Step 4: Create storage policy ===")
+        policy_id = vcenter.ensure_storage_policy(policy_name, tag_category, tag_name)
+
+        print("\n=== Step 5: Create content library ===")
+        # Use the NFS datastore as backing for the content library
+        lib_id = vcenter.ensure_local_content_library(library_name, ds_id)
+
+        print("\n=== Step 5b: Configure content library concurrent sync limit ===")
+        vcenter.set_content_library_max_concurrent_syncs(DEFAULT_INFRA_CL_MAX_CONCURRENT_SYNCS)
+
+        print("\n=== Step 6-9: Create namespace and assign resources ===")
+        cluster_id = vcenter.get_supervisor_cluster_id(cluster_name)
+        vcenter.ensure_supervisor_namespace(
+            namespace=namespace,
+            cluster_id=cluster_id,
+            storage_policy_id=policy_id,
+            vm_class_name=vm_class,
+            library_id=lib_id,
+        )
+
+        print("\n=== Infrastructure setup complete ===")
+        print(f"  Tag category:    {tag_category} ({cat_id})")
+        print(f"  Tag:             {tag_name} ({tag_id})")
+        print(f"  NFS datastore:   {ds_name} ({ds_id})")
+        print(f"  Storage policy:  {policy_name} ({policy_id})")
+        print(f"  Content library: {library_name} ({lib_id})")
+        print(f"  Namespace:       {namespace}")
+        return 0
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    finally:
+        vcenter.disconnect()
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     """Upload OVFs to a content library without deploying them.
 
@@ -3309,9 +3843,39 @@ def main() -> int:
         help="Path to write the results report (default: <csv>.<vcenter>.with-vmop.report.html)"
     )
 
-    # --- setup subcommand ---
+    # --- setup-infra subcommand ---
+    p_setup_infra = sub.add_parser(
+        "setup-infra",
+        help="Provision vSphere infrastructure (NFS datastore, tag, storage policy, namespace) for OVF tests"
+    )
+    p_setup_infra.add_argument("--vcenter", required=True, help="vCenter hostname or IP")
+    p_setup_infra.add_argument("--vcenter-user", default=DEFAULT_VCENTER_USER,
+                               help=f"vCenter username (default: {DEFAULT_VCENTER_USER})")
+    p_setup_infra.add_argument("--vcenter-password", required=True, help="vCenter password")
+    p_setup_infra.add_argument("--cluster", required=True,
+                               help="vSphere cluster name to mount the NFS datastore on")
+    p_setup_infra.add_argument("--nfs-ip", required=True,
+                               help="NFS server IP address")
+    p_setup_infra.add_argument("--nfs-path", default=DEFAULT_INFRA_NFS_PATH,
+                               help=f"NFS export path (default: {DEFAULT_INFRA_NFS_PATH})")
+    p_setup_infra.add_argument("--datastore-name", default=DEFAULT_INFRA_DS_NAME,
+                               help=f"Name for the NFS datastore (default: {DEFAULT_INFRA_DS_NAME})")
+    p_setup_infra.add_argument("--tag-category", default=DEFAULT_INFRA_TAG_CATEGORY,
+                               help=f"Tag category name (default: {DEFAULT_INFRA_TAG_CATEGORY})")
+    p_setup_infra.add_argument("--tag-name", default=DEFAULT_INFRA_TAG_NAME,
+                               help=f"Tag name (default: {DEFAULT_INFRA_TAG_NAME})")
+    p_setup_infra.add_argument("--storage-policy", default=DEFAULT_INFRA_STORAGE_POLICY,
+                               help=f"Storage policy name (default: {DEFAULT_INFRA_STORAGE_POLICY})")
+    p_setup_infra.add_argument("--content-library", default=DEFAULT_INFRA_CONTENT_LIBRARY,
+                               help=f"Content library name (default: {DEFAULT_INFRA_CONTENT_LIBRARY})")
+    p_setup_infra.add_argument("--namespace", default=DEFAULT_INFRA_NAMESPACE,
+                               help=f"Supervisor namespace name (default: {DEFAULT_INFRA_NAMESPACE})")
+    p_setup_infra.add_argument("--vm-class", default=DEFAULT_INFRA_VM_CLASS,
+                               help=f"VM class to assign to the namespace (default: {DEFAULT_INFRA_VM_CLASS})")
+
+    # --- setup-cl subcommand ---
     p_setup = sub.add_parser(
-        "setup",
+        "setup-cl",
         help="Upload OVFs to a content library (run before deploy/validate to isolate upload failures)"
     )
     p_setup.add_argument(
@@ -3397,7 +3961,9 @@ def main() -> int:
 
     if args.command == "discover":
         return cmd_discover(args)
-    elif args.command == "setup":
+    elif args.command == "setup-infra":
+        return cmd_setup_infra(args)
+    elif args.command == "setup-cl":
         return cmd_setup(args)
     elif args.command == "validate":
         return cmd_validate(args)

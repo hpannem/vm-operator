@@ -8,8 +8,6 @@ VMs using `kubectl` over SSH.
 
 - Python 3.10+
 - Access to a vCenter with a Supervisor cluster
-- A namespace named `ovftest` with a Content Library named `ovftest` already
-  created and bound to the namespace
 - Network access to the OVF source URLs (or local file paths)
 
 Install dependencies:
@@ -20,7 +18,63 @@ pip install -r requirements.txt
 
 ## Commands
 
-The tool has four subcommands: `discover`, `setup`, `deploy`, and `validate`.
+The tool has five subcommands: `setup-infra`, `discover`, `setup-cl`, `deploy`, and `validate`.
+
+### `setup-infra` — Provision vSphere Infrastructure
+
+Creates all vSphere infrastructure required for OVF deploy tests in one shot.
+Run this once against a fresh environment before running `setup-cl` or `deploy`.
+
+Steps performed (all idempotent — safe to re-run):
+
+1. Create tag category (`ds`) and tag (`largedatastore`)
+2. Mount NFS datastore (`nfsdatastore`, `/exports/nfsdatastore`) on all hosts in the cluster
+3. Attach the `largedatastore` tag to the datastore
+4. Create VM storage policy `ovftest-policy` selecting datastores tagged `largedatastore`
+5. Create local content library `ovftest` backed by the NFS datastore
+6. Create Supervisor namespace `ovftest`
+7. Assign storage policy `ovftest-policy` to the namespace
+8. Assign VM class `best-effort-xsmall` to the namespace
+9. Assign content library `ovftest` to the namespace
+
+```bash
+python ovf_deploy_test.py setup-infra \
+    --vcenter <vcenter-ip> \
+    --vcenter-password <password> \
+    --cluster <cluster-name> \
+    --nfs-ip <nfs-server-ip>
+```
+
+```
+usage: ovf_deploy_test.py setup-infra [-h] --vcenter HOST --vcenter-password PASS
+                                       [--vcenter-user USER]
+                                       --cluster CLUSTER --nfs-ip IP
+                                       [--nfs-path PATH]
+                                       [--datastore-name NAME]
+                                       [--tag-category NAME]
+                                       [--tag-name NAME]
+                                       [--storage-policy NAME]
+                                       [--content-library NAME]
+                                       [--namespace NAME]
+                                       [--vm-class CLASS]
+
+required arguments:
+  --vcenter HOST            vCenter hostname or IP
+  --vcenter-password PASS   vCenter API password
+  --cluster CLUSTER         vSphere cluster name to mount the NFS datastore on
+  --nfs-ip IP               NFS server IP address
+
+options:
+  --vcenter-user USER       vCenter username (default: administrator@vsphere.local)
+  --nfs-path PATH           NFS export path (default: /exports/nfsdatastore)
+  --datastore-name NAME     Name for the NFS datastore (default: nfsdatastore)
+  --tag-category NAME       Tag category name (default: ds)
+  --tag-name NAME           Tag name (default: largedatastore)
+  --storage-policy NAME     Storage policy name (default: ovftest-policy)
+  --content-library NAME    Content library name (default: ovftest)
+  --namespace NAME          Supervisor namespace name (default: ovftest)
+  --vm-class CLASS          VM class to assign to the namespace (default: best-effort-xsmall)
+```
 
 ### `discover` — Find OVFs from Artifactory
 
@@ -43,7 +97,7 @@ options:
                     (default: https://packages.vcfd.broadcom.net/ui/native/cls-generic-virtual/testdata/)
 ```
 
-### `setup` — Upload OVFs to a Content Library
+### `setup-cl` — Upload OVFs to a Content Library
 
 Uploads OVFs to a content library without deploying them. Run this before
 `deploy` or `validate` to pre-populate the library and isolate upload failures
@@ -63,7 +117,7 @@ achieved — no upload needed).
 
 ```bash
 # Step 1: upload all OVFs — re-run until only permanent failures remain
-python ovf_deploy_test.py setup ovfs.csv \
+python ovf_deploy_test.py setup-cl ovfs.csv \
     --vcenter <vcenter-ip> \
     --vcenter-password <password> \
     --parallel 5
@@ -74,12 +128,12 @@ python ovf_deploy_test.py validate ovfs.csv --vcenter <vcenter-ip> --vcenter-pas
 ```
 
 ```
-usage: ovf_deploy_test.py setup [-h] --vcenter HOST --vcenter-password PASS
-                                 [--vcenter-user USER]
-                                 [--vcenter-root-password PASS]
-                                 [--content-library NAME]
-                                 [--parallel N] [--report PATH]
-                                 csv
+usage: ovf_deploy_test.py setup-cl [-h] --vcenter HOST --vcenter-password PASS
+                                    [--vcenter-user USER]
+                                    [--vcenter-root-password PASS]
+                                    [--content-library NAME]
+                                    [--parallel N] [--report PATH]
+                                    csv
 
 positional arguments:
   csv                       CSV file with OVFs to upload
@@ -101,7 +155,7 @@ Reads a CSV file and deploys each OVF via VM Service. For each entry it:
 
 1. Downloads the OVF descriptor to inspect it (detects vApps, extracts network
    and vApp property definitions)
-2. Checks the Content Library for the item (expects `setup` was run first);
+2. Checks the Content Library for the item (expects `setup-cl` was run first);
    records `SKIPPED` if not found
 3. Waits for a `VirtualMachineImage` to appear in the target namespace
 4. Creates a `VirtualMachine` CR and waits for it to power on
@@ -110,10 +164,10 @@ Reads a CSV file and deploys each OVF via VM Service. For each entry it:
 
 **`--cleanup` mode (self-contained, space-efficient):** uploads the OVF inline,
 runs the test, deletes the VM, and deletes the CL item — no dependency on
-`setup`. Use this when CL space is limited or for one-off runs.
+`setup-cl`. Use this when CL space is limited or for one-off runs.
 
 ```bash
-# Default (requires setup to have been run first)
+# Default (requires setup-cl to have been run first)
 python ovf_deploy_test.py deploy ovfs.csv \
     --vcenter <vcenter-ip> \
     --vcenter-password <password>
@@ -215,6 +269,31 @@ options:
 > resource pool. Run the script once without `--resource-pool` to see the full RP
 > tree printed at startup, then re-run with the correct name.
 
+## Typical Workflow
+
+```bash
+# 1. Provision infrastructure (once per environment)
+python ovf_deploy_test.py setup-infra \
+    --vcenter <vcenter-ip> \
+    --vcenter-password <password> \
+    --cluster <cluster-name> \
+    --nfs-ip <nfs-ip>
+
+# 2. Discover OVFs
+python ovf_deploy_test.py discover ovfs.csv
+
+# 3. Upload OVFs to content library (re-run until no transient failures)
+python ovf_deploy_test.py setup-cl ovfs.csv \
+    --vcenter <vcenter-ip> \
+    --vcenter-password <password> \
+    --parallel 5
+
+# 4. Deploy via VM Service
+python ovf_deploy_test.py deploy ovfs.csv \
+    --vcenter <vcenter-ip> \
+    --vcenter-password <password>
+```
+
 ## CSV Format
 
 ```
@@ -298,39 +377,44 @@ it in a browser for a summary table with:
 | Default namespace | `ovftest` |
 | Default content library | `ovftest` |
 | Default VM class | `best-effort-xsmall` |
+| NFS datastore name | `nfsdatastore` |
+| NFS export path | `/exports/nfsdatastore` |
+| Tag category | `ds` |
+| Tag name | `largedatastore` |
+| Storage policy | `ovftest-policy` |
 | Network mapping | NSX: SubnetSet `""`, VDS: Network `""` (set with `--network-type`) |
 | VM power-on timeout | 5 minutes |
 
 ## How It Works
 
 ```
-discover          setup                      deploy (default)               validate
-────────          ─────                      ────────────────               ────────
-Artifactory API   CSV file                   CSV file                       CSV file
-    │                 │                          │                              │
-    ▼                 ▼                          ▼                              ▼
-ovf_files.csv    OvfEntry list             OvfEntry list                 OvfEntry list
-                      │                          │                              │
-               for each entry:            for each entry:                for each entry:
-                      │                          │                              │
-               ┌──────▼─────────────┐    ┌───────▼─────────────────┐   ┌──────▼──────────────────────────┐
-               │ 1. SUCCESS if item │    │ 1. Download OVF          │   │ 1. Download OVF descriptor       │
-               │    already in CL   │    │    descriptor            │   │    (detect vApp)                 │
-               │ 2. Upload to CL    │    │ 2. Check CL — SKIPPED    │   │ 2. Upload to CL (no-op if        │
-               │    (PULL/PUSH)     │    │    if not found          │   │    setup ran first)              │
-               │ 3. Classify error  │    │ 3. Wait for VMI          │   │ 3. Delete any pre-existing VM/   │
-               │    transient vs    │    │ 4. Create VM CR          │   │    vApp with the same name       │
-               │    permanent       │    │ 5. Poll for PoweredOn    │   │ 4. Deploy VM or vApp via REST    │
-               │ 4. Update state    │    │ 6. Always delete VM      │   │ 5. Poll for PoweredOn state      │
-               │    file + report   │    │ 7. Record result         │   │ 6. Record result + update report │
-               └────────────────────┘    └─────────────────────────┘   │ 7. Always delete VM/vApp + CL    │
-                                                                        └──────────────────────────────────┘
-               Reports:                  With --cleanup: upload inline,
-               <csv>.with-cl-setup       delete CL item after test      Report:
-               .report.html              (no setup dependency)          <csv>.with-cl.report.html
-               <csv>.setup-state.<vc>.<lib>.json
-                                         Report:
-                                         <csv>.with-vmop.report.html
+setup-infra       discover          setup-cl                   deploy (default)               validate
+───────────       ────────          ────────                   ────────────────               ────────
+vCenter API       Artifactory API   CSV file                   CSV file                       CSV file
+    │                 │                 │                          │                              │
+    ▼                 ▼                 ▼                          ▼                              ▼
+1. tag category   ovf_files.csv    OvfEntry list             OvfEntry list                 OvfEntry list
+2. tag                                  │                          │                              │
+3. NFS datastore                 for each entry:            for each entry:                for each entry:
+4. tag datastore                        │                          │                              │
+5. storage policy                ┌──────▼─────────────┐    ┌───────▼─────────────────┐   ┌──────▼──────────────────────────┐
+6. content library               │ 1. SUCCESS if item │    │ 1. Download OVF          │   │ 1. Download OVF descriptor       │
+7. namespace                     │    already in CL   │    │    descriptor            │   │    (detect vApp)                 │
+8. assign storage                │ 2. Upload to CL    │    │ 2. Check CL — SKIPPED    │   │ 2. Upload to CL (no-op if        │
+9. assign vm class               │    (PULL/PUSH)     │    │    if not found          │   │    setup-cl ran first)           │
+   assign library                │ 3. Classify error  │    │ 3. Wait for VMI          │   │ 3. Delete any pre-existing VM/   │
+                                 │    transient vs    │    │ 4. Create VM CR          │   │    vApp with the same name       │
+                                 │    permanent       │    │ 5. Poll for PoweredOn    │   │ 4. Deploy VM or vApp via REST    │
+                                 │ 4. Update state    │    │ 6. Always delete VM      │   │ 5. Poll for PoweredOn state      │
+                                 │    file + report   │    │ 7. Record result         │   │ 6. Record result + update report │
+                                 └────────────────────┘    └─────────────────────────┘   │ 7. Always delete VM/vApp + CL    │
+                                                                                         └──────────────────────────────────┘
+                                 Reports:                  With --cleanup: upload inline,
+                                 <csv>.with-cl-setup       delete CL item after test      Report:
+                                 .report.html              (no setup-cl dependency)       <csv>.with-cl.report.html
+                                 <csv>.setup-state.<vc>.<lib>.json
+                                                           Report:
+                                                           <csv>.with-vmop.report.html
 ```
 
 Upload strategy:
