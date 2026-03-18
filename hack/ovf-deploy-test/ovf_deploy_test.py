@@ -74,8 +74,8 @@ DEFAULT_SUBNET_PREFIX_LENGTH = 24
 
 
 # Timeouts
-VMI_WAIT_TIMEOUT = 300  # 10 minutes
-VM_TOOLS_WAIT_TIMEOUT = 300  # 10 minutes
+VMI_WAIT_TIMEOUT = 600  # 10 minutes
+VM_TOOLS_WAIT_TIMEOUT = 300  # 5 minutes
 POLL_INTERVAL = 10  # seconds
 
 class UntrustedSourceError(RuntimeError):
