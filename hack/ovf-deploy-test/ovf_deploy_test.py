@@ -69,6 +69,8 @@ DEFAULT_CONTENT_LIBRARY = "ovftest"
 DEFAULT_VM_CLASS = "best-effort-xsmall"
 DEFAULT_VCENTER_USER = "administrator@vsphere.local"
 STORAGE_CLASS = "wcpglobal-storage-profile"
+DEFAULT_VM_VERSION = "v1alpha5"
+DEFAULT_SUBNET_PREFIX_LENGTH = 24
 
 
 # Timeouts
@@ -2219,7 +2221,7 @@ class SupervisorClient:
             }
 
         vm_manifest = {
-            "apiVersion": "vmoperator.vmware.com/v1alpha6",
+            "apiVersion": "vmoperator.vmware.com/" + DEFAULT_VM_VERSION,
             "kind": "VirtualMachine",
             "metadata": {
                 "name": vm_name,
@@ -2541,16 +2543,16 @@ def _smart_value_for_property(prop: OvfProperty, for_vcenter: bool = False) -> s
     # e.g. Ip('Network 1'), Netmask('Network 1'), Gateway('Network 1'), Dns('Network 1')
     if qualifiers.startswith("ip("):
         return "192.0.2.1" if for_vcenter else \
-            '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
+            '{{ V1alpha5_FormatIP (index (index .V1alpha5.Net.Devices 0).IPAddresses 0) "" }}'
     if qualifiers.startswith("netmask("):
         return "255.255.255.0" if for_vcenter else \
-            '{{ V1alpha6_SubnetMask (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
+            '{{ V1alpha5_SubnetMask (index (index .V1alpha5.Net.Devices 0).IPAddresses 0) }}'
     if qualifiers.startswith("gateway("):
         return "192.0.2.254" if for_vcenter else \
-            "{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}"
+            "{{ (index .V1alpha5.Net.Devices 0).Gateway4 }}"
     if qualifiers.startswith("dns("):
         return "8.8.8.8" if for_vcenter else \
-            '{{ V1alpha6_FormatNameservers -1 "," }}'
+            '{{ V1alpha5_FormatNameservers -1 "," }}'
 
     # --- OVF type-based rules ---
     if typ == "boolean":
@@ -2582,7 +2584,7 @@ def _smart_value_for_property(prop: OvfProperty, for_vcenter: bool = False) -> s
 
     if typ == "ip":
         return "192.0.2.1" if for_vcenter else \
-            '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
+            '{{ V1alpha5_FormatIP (index (index .V1alpha5.Net.Devices 0).IPAddresses 0) "" }}'
 
     # --- Key/label/description pattern matching ---
 
@@ -2594,13 +2596,12 @@ def _smart_value_for_property(prop: OvfProperty, for_vcenter: bool = False) -> s
     if any(x in combined for x in ("prefixlen", "prefix_len", "prefix-len")) or \
        (any(x in combined for x in ("prefix", "cidr")) and
             not any(x in combined for x in ("netmask", "subnet mask", "subnetmask"))):
-        return "24" if for_vcenter else \
-            '{{ V1alpha6_SubnetPrefixLength (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
+        return str(DEFAULT_SUBNET_PREFIX_LENGTH)
 
     # Subnet mask (dotted-decimal, e.g. "255.255.255.0")
     if any(x in combined for x in ("netmask", "subnet mask", "subnetmask", "net.mask", "net_mask")):
         return "255.255.255.0" if for_vcenter else \
-            '{{ V1alpha6_SubnetMask (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}'
+            '{{ V1alpha5_SubnetMask (index (index .V1alpha5.Net.Devices 0).IPAddresses 0) }}'
 
     # IP address (but not gateway/dns) — also matches short keys like "ip0", "ip1"
     if (any(x in combined for x in ("ip address", "ip_address", "ipaddress", "net.addr",
@@ -2609,17 +2610,17 @@ def _smart_value_for_property(prop: OvfProperty, for_vcenter: bool = False) -> s
             re.search(r'\bip\d*\b', key)) and \
        not any(x in combined for x in ("gateway", "dns", "nameserver", "netmask", "subnet")):
         return "192.0.2.1" if for_vcenter else \
-            '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) "" }}'
+            '{{ V1alpha5_FormatIP (index (index .V1alpha5.Net.Devices 0).IPAddresses 0) "" }}'
 
     # Gateway — also matches "gateway0", "gateway1"
     if any(x in combined for x in ("gateway", "default route", "net.gateway", "net_gateway")):
         return "192.0.2.254" if for_vcenter else \
-            "{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}"
+            "{{ (index .V1alpha5.Net.Devices 0).Gateway4 }}"
 
     # DNS / nameservers — also matches "dns0", "DNS0"
     if any(x in combined for x in ("dns", "nameserver", "name server", "net.dns")):
         return "8.8.8.8" if for_vcenter else \
-            '{{ V1alpha6_FormatNameservers -1 "," }}'
+            '{{ V1alpha5_FormatNameservers -1 "," }}'
 
     # Domain / search path
     if any(x in combined for x in ("domain", "searchpath", "search path", "search_path", "dnsdomain")):
