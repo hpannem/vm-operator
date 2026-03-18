@@ -18,7 +18,7 @@ pip install -r requirements.txt
 
 ## Commands
 
-The tool has five subcommands: `setup-infra`, `discover`, `setup-cl`, `deploy`, and `validate`.
+The tool has six subcommands: `setup-infra`, `discover`, `setup-cl`, `deploy`, `validate`, and `check-vmi-status`.
 
 ### `setup-infra` — Provision vSphere Infrastructure
 
@@ -113,7 +113,9 @@ transient `SETUP_FAILED` entries remain, then run `deploy` or `validate`.
 Delete the state file to force a full re-run from scratch.
 
 OVFs already present in the content library are reported as `SUCCESS` (goal
-achieved — no upload needed).
+achieved — no upload needed). This check happens **before** consulting the state
+file, so manually uploaded items are always detected — even if the state file
+records a permanent failure for that entry.
 
 ```bash
 # Step 1: upload all OVFs — re-run until only permanent failures remain
@@ -213,6 +215,67 @@ options:
   --parallel N              Number of OVFs to deploy concurrently (default: 1)
   --report PATH             Path to write the HTML report (default: <csv>.<vcenter>.with-vmop.report.html)
 ```
+
+### `check-vmi-status` — Check VirtualMachineImage Readiness
+
+Queries the Supervisor for `VirtualMachineImage` CRs and reports whether each
+OVF that was successfully uploaded to the content library has a corresponding
+Ready VMI. Uses the setup-state JSON as the source of truth for which OVFs are
+in the content library.
+
+With `--wait`, polls until all VMIs are Ready (or the timeout expires), updating
+the HTML report after each poll. This is the recommended way to decouple VMI
+sync from the `deploy` run — run `check-vmi-status --wait` after `setup-cl`,
+then run `deploy` knowing all VMIs are already Ready.
+
+```bash
+# One-shot status check
+python ovf_deploy_test.py check-vmi-status ovfs.csv \
+    --vcenter <vcenter-ip> \
+    --vcenter-password <root-ssh-password>
+
+# Wait until all VMIs are Ready (polls every 30s, timeout 10min)
+python ovf_deploy_test.py check-vmi-status ovfs.csv \
+    --vcenter <vcenter-ip> \
+    --vcenter-password <root-ssh-password> \
+    --wait --wait-timeout 3600
+```
+
+```
+usage: ovf_deploy_test.py check-vmi-status [-h] --vcenter HOST --vcenter-password PASS
+                                             [--vcenter-user USER]
+                                             [--vcenter-root-password PASS]
+                                             [--namespace NS]
+                                             [--content-library NAME]
+                                             [--state-file PATH]
+                                             [--wait] [--wait-timeout SECONDS]
+                                             [--wait-interval SECONDS]
+                                             [--report PATH]
+                                             csv
+
+positional arguments:
+  csv                       CSV file used for setup-cl (resolves source URLs and state file path)
+
+options:
+  --vcenter HOST            vCenter hostname or IP (required)
+  --vcenter-password PASS   vCenter API password (required)
+  --vcenter-user USER       vCenter username (default: administrator@vsphere.local)
+  --vcenter-root-password PASS
+                            vCenter root SSH password (default: same as --vcenter-password)
+  --namespace NS            Supervisor namespace to query VMIs from (default: ovftest)
+  --content-library NAME    Content library name — used to locate the state file (default: ovftest)
+  --state-file PATH         Path to the setup-state JSON (default: <csv>.setup-state.<vcenter>.<library>.json)
+  --wait                    Poll until all VMIs are Ready or --wait-timeout is reached
+  --wait-timeout SECONDS    Maximum wait time in seconds (default: 600)
+  --wait-interval SECONDS   Polling interval when --wait is set (default: 30s)
+  --report PATH             Path to write the HTML report (default: <csv>.<vcenter>.vmi-status.report.html)
+```
+
+The HTML report contains one row per OVF with:
+- OVF name (linked to source URL)
+- VMI CR name and UID
+- Status badge: ✅ READY, ⚠️ NOT_READY, ❌ NOT_FOUND
+- Reason from the VMI Ready condition
 
 ### `validate` — Validate OVFs directly via vSphere API
 
@@ -388,8 +451,8 @@ it in a browser for a summary table with:
 ## How It Works
 
 ```
-setup-infra       discover          setup-cl                   deploy (default)               validate
-───────────       ────────          ────────                   ────────────────               ────────
+setup-infra       discover          setup-cl                   deploy (default)               validate              check-vmi-status
+───────────       ────────          ────────                   ────────────────               ────────              ────────────────
 vCenter API       Artifactory API   CSV file                   CSV file                       CSV file
     │                 │                 │                          │                              │
     ▼                 ▼                 ▼                          ▼                              ▼

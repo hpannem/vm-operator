@@ -3180,39 +3180,21 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     def setup_one(entry: OvfEntry, vc: VCenterClient) -> None:
         """Process a single OVF entry using the provided vCenter client."""
-        # Skip if previously failed with a permanent (non-transient) error.
         prev = state.get(entry.name)
-        if prev and prev.get("status") == "SETUP_FAILED" and not prev.get("transient"):
-            prev_reason = prev.get('reason', '')
-            # Don't double-prefix if already marked as permanent
-            if not prev_reason.startswith("[Permanent, not retried]"):
-                prev_reason = f"[Permanent, not retried] {prev_reason}"
-            print(f"\n[{entry.name}] Skipping — permanent failure from previous run: {prev_reason[:100]}")
-            record(DeployResult(
-                name=entry.name, source=entry.source, vm_name="",
-                status="SETUP_FAILED",
-                reason=prev_reason
-            ))
-            return
+        is_permanent_failure = (
+            prev and prev.get("status") == "SETUP_FAILED" and not prev.get("transient")
+        )
 
         print(f"\n{'=' * 60}")
         print(f"Setup: {entry.name}  ({entry.source})")
         print(f"{'=' * 60}")
 
         try:
+            # Always check CL first — a manually uploaded item overrides any prior state,
+            # including permanent failures.
             existing = vc.find_library_item(library_id, entry.name)
             if existing:
                 if existing["size"] > 0:
-                    # If state also says SUCCESS, we're done
-                    if prev and prev.get("status") == "SUCCESS":
-                        print(f"  Already in content library with valid size, skipping upload")
-                        record(DeployResult(
-                            name=entry.name, source=entry.source, vm_name="",
-                            status="SUCCESS", reason="Already present in content library"
-                        ))
-                        return
-                    # State doesn't say SUCCESS (e.g. transient failure last run) but item is
-                    # present and non-empty — treat as success, no need to re-upload
                     print(f"  Item present in content library ({existing['size']} bytes), marking SUCCESS")
                     record(DeployResult(
                         name=entry.name, source=entry.source, vm_name="",
@@ -3221,12 +3203,25 @@ def cmd_setup(args: argparse.Namespace) -> int:
                     return
                 else:
                     print(f"  Found 0-byte item in content library — deleting and re-uploading")
-                    # upload_ovf will also delete it, but do it here so the state is clear
                     try:
                         vc.delete_library_item(existing["id"])
                     except Exception as _del_err:
                         print(f"  Warning: could not delete 0-byte item: {_del_err}")
-            elif prev and prev.get("status") == "SUCCESS":
+
+            # Item not in CL. If this was a permanent failure, skip the upload attempt.
+            if is_permanent_failure:
+                prev_reason = prev.get('reason', '')
+                if not prev_reason.startswith("[Permanent, not retried]"):
+                    prev_reason = f"[Permanent, not retried] {prev_reason}"
+                print(f"  Skipping upload — permanent failure from previous run: {prev_reason[:100]}")
+                record(DeployResult(
+                    name=entry.name, source=entry.source, vm_name="",
+                    status="SETUP_FAILED",
+                    reason=prev_reason
+                ))
+                return
+
+            if prev and prev.get("status") == "SUCCESS":
                 # State says SUCCESS but item is gone from CL — re-upload
                 print(f"  State says SUCCESS but item missing from content library — re-uploading")
 
@@ -3751,6 +3746,315 @@ def cmd_validate(args: argparse.Namespace) -> int:
             vcenter.disconnect()
 
 
+@dataclass
+class VmiStatusResult:
+    """Status of a single OVF's VirtualMachineImage on the Supervisor."""
+    name: str          # OVF name (from state file)
+    source: str        # OVF source URL
+    vmi_name: str      # VMI CR name, empty if not found
+    vmi_uid: str       # VMI UID, empty if not found
+    status: str        # READY / NOT_READY / NOT_FOUND
+    reason: str        # Human-readable condition message or explanation
+
+
+def _fetch_vmi_results(supervisor: "SupervisorClient", namespace: str,
+                       cl_entries: dict, ovf_entries: dict) -> list[VmiStatusResult]:
+    """
+    Fetch all VMIs from the Supervisor and match them against cl_entries.
+    Returns a list of VmiStatusResult, one per CL entry.
+    """
+    stdout, _, rc = supervisor.run_kubectl(
+        f"get vmi -n {namespace} -o json", check=False
+    )
+    if rc != 0 or not stdout.strip():
+        raise RuntimeError("Could not list VMIs from Supervisor")
+
+    vmi_list = json.loads(stdout).get("items", [])
+
+    # Build lookup: lowercase cr name / display name -> vmi item
+    vmi_by_name: dict[str, dict] = {}
+    for item in vmi_list:
+        vmi_cr_name = item.get("metadata", {}).get("name", "")
+        display_name = item.get("status", {}).get("name", "")
+        if vmi_cr_name:
+            vmi_by_name[vmi_cr_name.lower()] = item
+        if display_name:
+            vmi_by_name[display_name.lower()] = item
+
+    results: list[VmiStatusResult] = []
+    for name in sorted(cl_entries):
+        entry = ovf_entries.get(name)
+        source = entry.source if entry else ""
+
+        # Find matching VMI — exact name first, then substring
+        matched_item = vmi_by_name.get(name.lower())
+        if not matched_item:
+            for vmi_item in vmi_list:
+                vmi_cr_name = vmi_item.get("metadata", {}).get("name", "")
+                display_name = vmi_item.get("status", {}).get("name", "")
+                if (name.lower() in vmi_cr_name.lower() or
+                        name.lower() in display_name.lower()):
+                    matched_item = vmi_item
+                    break
+
+        if not matched_item:
+            results.append(VmiStatusResult(
+                name=name, source=source,
+                vmi_name="", vmi_uid="",
+                status="NOT_FOUND",
+                reason="No VirtualMachineImage found in namespace",
+            ))
+            continue
+
+        vmi_cr_name = matched_item.get("metadata", {}).get("name", "")
+        vmi_uid = matched_item.get("metadata", {}).get("uid", "")
+        conditions = matched_item.get("status", {}).get("conditions", [])
+        ready_cond = next((c for c in conditions if c.get("type") == "Ready"), None)
+
+        if ready_cond and ready_cond.get("status") == "True":
+            results.append(VmiStatusResult(
+                name=name, source=source,
+                vmi_name=vmi_cr_name, vmi_uid=vmi_uid,
+                status="READY",
+                reason=ready_cond.get("message", ""),
+            ))
+        else:
+            reason = ""
+            if ready_cond:
+                reason = ready_cond.get("message", "") or ready_cond.get("reason", "")
+            results.append(VmiStatusResult(
+                name=name, source=source,
+                vmi_name=vmi_cr_name, vmi_uid=vmi_uid,
+                status="NOT_READY",
+                reason=reason or "Ready condition not True",
+            ))
+
+    return results
+
+
+def cmd_check_vmi_status(args: argparse.Namespace) -> int:
+    """
+    Check VirtualMachineImage readiness for all OVFs uploaded to the content library.
+
+    Uses the setup-state JSON as the source of truth for which OVFs are in the
+    content library (SUCCESS entries only), then queries the Supervisor for their
+    corresponding VMI CRs and reports Ready / Not Ready / Not Found.
+
+    With --wait, polls until all VMIs are Ready or the timeout expires.
+    """
+    # Load setup state — source of truth for what's in the CL
+    if getattr(args, "state_file", None):
+        try:
+            with open(args.state_file) as f:
+                setup_state = json.load(f)
+            print(f"Loaded setup state from {args.state_file} ({len(setup_state)} entries)")
+        except Exception as e:
+            print(f"ERROR: Could not read state file {args.state_file}: {e}")
+            return 1
+    else:
+        setup_state = _load_setup_state(args.csv, args.vcenter, args.content_library)
+    if not setup_state:
+        print(f"ERROR: No setup state found for {args.csv} / {args.vcenter} / {args.content_library}")
+        print("Run 'setup-cl' first to populate the content library.")
+        return 1
+
+    cl_entries = {name: info for name, info in setup_state.items()
+                  if info.get("status") == "SUCCESS"}
+    if not cl_entries:
+        print("No SUCCESS entries in setup state — nothing to check.")
+        return 1
+    print(f"Checking VMI status for {len(cl_entries)} CL entries...")
+
+    # Load CSV to get source URLs for report links
+    ovf_entries = {e.name: e for e in load_ovf_list(args.csv)}
+
+    wait_mode = getattr(args, "wait", False)
+    wait_timeout = getattr(args, "wait_timeout", VMI_WAIT_TIMEOUT)
+    wait_interval = getattr(args, "wait_interval", 30)
+
+    vcenter = None
+    supervisor = None
+    try:
+        vcenter = VCenterClient(
+            args.vcenter, args.vcenter_user,
+            args.vcenter_password, args.vcenter_root_password,
+        )
+        vcenter.connect(ssh=False)
+        vcenter._create_ssh_session()
+
+        supervisor_ip, supervisor_password = vcenter.get_supervisor_credentials()
+        supervisor = SupervisorClient(supervisor_ip, supervisor_password)
+        supervisor.connect()
+
+        _safe_vc = args.vcenter.replace(":", "_").replace("/", "_")
+        report_path = args.report or (
+            os.path.splitext(args.csv)[0] + f".{_safe_vc}.vmi-status.report.html"
+        )
+        run_start = time.time()
+
+        print(f"Fetching VMIs in namespace '{args.namespace}'...")
+        results = _fetch_vmi_results(supervisor, args.namespace, cl_entries, ovf_entries)
+        _write_vmi_report(results, report_path, run_start, args.vcenter)
+
+        if not wait_mode:
+            return 0
+
+        # --wait: poll until all VMIs are Ready or timeout
+        deadline = run_start + wait_timeout
+        poll = 0
+        while True:
+            not_ready = [r for r in results if r.status != "READY"]
+            if not not_ready:
+                print(f"\nAll {len(results)} VMIs are Ready.")
+                return 0
+
+            elapsed = int(time.time() - run_start)
+            remaining = int(deadline - time.time())
+            if remaining <= 0:
+                print(f"\nTimeout after {elapsed}s — "
+                      f"{len(not_ready)} VMI(s) still not Ready:")
+                for r in not_ready:
+                    print(f"  {r.name}: {r.status} — {r.reason[:80]}")
+                return 1
+
+            poll += 1
+            not_ready_names = ", ".join(r.name for r in not_ready[:5])
+            if len(not_ready) > 5:
+                not_ready_names += f" (+{len(not_ready) - 5} more)"
+            print(f"\n[{elapsed}s elapsed, {remaining}s remaining] "
+                  f"{len(not_ready)} not Ready: {not_ready_names}")
+            print(f"  Next check in {wait_interval}s...")
+            time.sleep(wait_interval)
+
+            print(f"Fetching VMIs in namespace '{args.namespace}'...")
+            results = _fetch_vmi_results(supervisor, args.namespace, cl_entries, ovf_entries)
+            _write_vmi_report(results, report_path, run_start, args.vcenter)
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+    finally:
+        if supervisor:
+            supervisor.disconnect()
+        if vcenter:
+            vcenter.disconnect()
+
+
+_VMI_STATUS_STYLE = {
+    "READY":     ("✅", "#1a7f37", "#dafbe1"),
+    "NOT_READY": ("⚠️",  "#9a6700", "#fff8c5"),
+    "NOT_FOUND": ("❌", "#cf222e", "#ffebe9"),
+}
+
+
+def _write_vmi_report(results: list[VmiStatusResult], report_path: str,
+                      start_time: Optional[float], vcenter_ip: str) -> None:
+    """Write an HTML VMI status report and print a summary to stdout."""
+    now = time.time()
+    generated = time.strftime("%Y-%m-%d %H:%M:%S")
+    title = "VMI Status Report"
+    full_title = f"{title} — {vcenter_ip}" if vcenter_ip else title
+
+    rows_html = []
+    for r in results:
+        icon, fg, bg = _VMI_STATUS_STYLE.get(r.status, ("•", "#24292f", "#f6f8fa"))
+        name_cell = (
+            f'<a href="{_html_escape(r.source)}" target="_blank">{_html_escape(r.name)}</a>'
+            if r.source.startswith("http")
+            else _html_escape(r.name)
+        )
+        badge = (
+            f'<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
+            f'background:{bg};color:{fg};font-weight:600;font-size:0.85em;'
+            f'border:1px solid {fg}33;">{icon} {_html_escape(r.status)}</span>'
+        )
+        vmi_cell = (
+            f'<span style="font-family:monospace;font-size:0.85em;">{_html_escape(r.vmi_name)}</span>'
+            f'<br><span style="font-size:0.75em;color:#57606a;">{_html_escape(r.vmi_uid)}</span>'
+            if r.vmi_name else '<span style="color:#57606a;font-size:0.85em;">—</span>'
+        )
+        rows_html.append(
+            f"<tr>"
+            f'<td style="padding:8px 12px;">{name_cell}</td>'
+            f'<td style="padding:8px 12px;">{vmi_cell}</td>'
+            f'<td style="padding:8px 12px;text-align:center;">{badge}</td>'
+            f'<td style="padding:8px 12px;font-size:0.85em;color:#24292f;">{_html_escape(r.reason)}</td>'
+            f"</tr>"
+        )
+
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r.status] = counts.get(r.status, 0) + 1
+    summary_parts = []
+    for status, (icon, fg, _bg) in _VMI_STATUS_STYLE.items():
+        n = counts.get(status, 0)
+        if n:
+            summary_parts.append(
+                f'<span style="margin-right:16px;color:{fg};font-weight:600;">'
+                f'{icon} {status}: {n}</span>'
+            )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{full_title} — {generated}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         margin: 32px; color: #24292f; background: #fff; }}
+  h1   {{ font-size: 1.4em; margin-bottom: 4px; }}
+  .meta {{ color: #57606a; font-size: 0.85em; margin-bottom: 20px; }}
+  .summary {{ margin-bottom: 20px; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.9em; }}
+  thead th {{ background: #f6f8fa; border-bottom: 2px solid #d0d7de;
+              padding: 8px 12px; text-align: left; font-weight: 600; }}
+  tbody tr:nth-child(even) {{ background: #f6f8fa; }}
+  tbody tr:hover {{ background: #eaf5ff; }}
+  td, th {{ border: 1px solid #d0d7de; vertical-align: top; }}
+  a {{ color: #0969da; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<h1>{full_title}</h1>
+<div class="meta">Generated: {generated} &nbsp;|&nbsp; Total: {len(results)}{_timing_html(start_time, now)}</div>
+<div class="summary">{"".join(summary_parts)}</div>
+<table>
+<thead>
+  <tr>
+    <th>OVF Name</th>
+    <th>VMI Name / UID</th>
+    <th>Status</th>
+    <th>Reason</th>
+  </tr>
+</thead>
+<tbody>
+{"".join(rows_html)}
+</tbody>
+</table>
+</body>
+</html>
+"""
+    with open(report_path, "w") as f:
+        f.write(html)
+
+    print(f"\n{'='*60}")
+    print(f"{full_title} — {generated}")
+    print(f"{'='*60}")
+    col = max((len(r.name) for r in results), default=10)
+    for r in results:
+        icon = _VMI_STATUS_STYLE.get(r.status, ("•",))[0]
+        print(f"  {icon} {r.name:<{col}}  {r.status:<10}  {r.reason[:80]}")
+    print(f"\n{'='*60}")
+    for status, n in sorted(counts.items()):
+        icon = _VMI_STATUS_STYLE.get(status, ("•",))[0]
+        print(f"  {icon} {status}: {n}")
+    print(f"\nReport written to {report_path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="OVF deploy test tool for VM Service on Supervisor"
@@ -3901,6 +4205,54 @@ def main() -> int:
         help="Path to write the results report (default: <csv>.with-cl-setup.report.html)"
     )
 
+    # --- check-vmi-status subcommand ---
+    p_vmi = sub.add_parser(
+        "check-vmi-status",
+        help="Check VirtualMachineImage readiness for all OVFs in the content library"
+    )
+    p_vmi.add_argument(
+        "csv",
+        help="CSV file used for setup-cl (to resolve source URLs and state file path)"
+    )
+    _add_vcenter_args(p_vmi)
+    p_vmi.add_argument(
+        "--namespace",
+        default=DEFAULT_NAMESPACE,
+        help=f"Supervisor namespace to query VMIs from (default: {DEFAULT_NAMESPACE})"
+    )
+    p_vmi.add_argument(
+        "--content-library",
+        default=DEFAULT_CONTENT_LIBRARY,
+        help=f"Content library name (used to locate the state file) (default: {DEFAULT_CONTENT_LIBRARY})"
+    )
+    p_vmi.add_argument(
+        "--state-file",
+        help="Path to the setup-state JSON file (default: <csv>.setup-state.<vcenter>.<library>.json)"
+    )
+    p_vmi.add_argument(
+        "--wait",
+        action="store_true",
+        help="Poll until all VMIs are Ready or --wait-timeout is reached"
+    )
+    p_vmi.add_argument(
+        "--wait-timeout",
+        type=int,
+        default=VMI_WAIT_TIMEOUT,
+        metavar="SECONDS",
+        help=f"Maximum time to wait for all VMIs to become Ready (default: {VMI_WAIT_TIMEOUT}s)"
+    )
+    p_vmi.add_argument(
+        "--wait-interval",
+        type=int,
+        default=30,
+        metavar="SECONDS",
+        help="Polling interval when --wait is set (default: 30s)"
+    )
+    p_vmi.add_argument(
+        "--report",
+        help="Path to write the HTML report (default: <csv>.<vcenter>.vmi-status.report.html)"
+    )
+
     # --- validate subcommand ---
     p_validate = sub.add_parser(
         "validate",
@@ -3966,6 +4318,8 @@ def main() -> int:
         return cmd_setup_infra(args)
     elif args.command == "setup-cl":
         return cmd_setup(args)
+    elif args.command == "check-vmi-status":
+        return cmd_check_vmi_status(args)
     elif args.command == "validate":
         return cmd_validate(args)
     else:
