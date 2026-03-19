@@ -2120,7 +2120,7 @@ class SupervisorClient:
                     for item in vmi_list.get("items", []):
                         vmi_name = item.get("metadata", {}).get("name", "")
                         display_name = item.get("status", {}).get("name", "")
-                        if image_name.lower() in vmi_name.lower() or image_name.lower() in display_name.lower():
+                        if image_name.lower() == display_name.lower():
                             last_seen_vmi_name = vmi_name
                             conditions = item.get("status", {}).get("conditions", [])
                             for cond in conditions:
