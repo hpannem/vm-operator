@@ -22,7 +22,7 @@ properties:
     value: '{{ V1alpha6_FormatNameservers -1 "," }}'
 - key: ipv4_type
   value:
-    value: static
+    value: Static
 - key: ipv4_address
   value:
     value: '{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses
@@ -52,3 +52,6 @@ properties:
 - key: vmname
   value:
     value: VMware_Aria_Operations
+- key: otk
+  value:
+    value: "token12345678"
