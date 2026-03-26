@@ -484,7 +484,7 @@ func netOpNetIfToResult(
 		// DHCP4/DHCP6 are not set in StaticPool mode, only IPConfigs are populated.
 		for _, ip := range netIf.Status.IPConfigs {
 			ipConfig := NetworkInterfaceIPConfig{
-				IPCIDR:  ipCIDRNotation(ip.IP, ip.SubnetMask, ip.IPFamily == corev1.IPv4Protocol),
+				IPCIDR:  ipCIDRFromNetOPIPConfig(ip),
 				IsIPv4:  ip.IPFamily == corev1.IPv4Protocol,
 				Gateway: ip.Gateway,
 			}
@@ -965,6 +965,24 @@ func waitForReadyNCPNetworkInterface(
 	}
 
 	return vnetIf, nil
+}
+
+// ipCIDRFromNetOPIPConfig builds the CIDR string for a NetOP IPConfig, preferring
+// the Prefix field over the deprecated SubnetMask field.
+func ipCIDRFromNetOPIPConfig(ip netopv1alpha1.IPConfig) string {
+	isIPv4 := ip.IPFamily == corev1.IPv4Protocol
+	mask := ip.SubnetMask
+	// Prefix is an integer (e.g. 24, 64) while ipCIDRNotation expects a subnet mask
+	// string (e.g. "255.255.255.0", "ffff:ffff:ffff:ffff::"). Convert via net.CIDRMask
+	// so we can reuse ipCIDRNotation for both paths.
+	if ip.Prefix != nil {
+		bits := 32
+		if !isIPv4 {
+			bits = 128
+		}
+		mask = net.IP(net.CIDRMask(int(*ip.Prefix), bits)).String()
+	}
+	return ipCIDRNotation(ip.IP, mask, isIPv4)
 }
 
 // ipCIDRNotation takes the IP and subnet mask and returns the IP in CIDR notation.

@@ -634,16 +634,16 @@ var _ = Describe("CreateAndWaitForNetworkInterfaces", Label(testlabels.VCSim), f
 					netInterface.Status.IPAssignmentMode = netopv1alpha1.NetworkInterfaceIPAssignmentModeStaticPool
 					netInterface.Status.IPConfigs = []netopv1alpha1.IPConfig{
 						{
-							IP:         "2001:db8::100",
-							IPFamily:   corev1.IPv6Protocol,
-							Gateway:    "2001:db8::1",
-							SubnetMask: "ffff:ffff:ffff:ffff::",
+							IP:       "2001:db8::100",
+							IPFamily: corev1.IPv6Protocol,
+							Gateway:  "2001:db8::1",
+							Prefix:   ptr.To(int32(64)),
 						},
 						{
-							IP:         "2001:db8::101",
-							IPFamily:   corev1.IPv6Protocol,
-							Gateway:    "2001:db8::1",
-							SubnetMask: "ffff:ffff:ffff:ffff::",
+							IP:       "2001:db8::101",
+							IPFamily: corev1.IPv6Protocol,
+							Gateway:  "2001:db8::1",
+							Prefix:   ptr.To(int32(64)),
 						},
 					}
 					netInterface.Status.Conditions = []netopv1alpha1.NetworkInterfaceCondition{
@@ -700,16 +700,16 @@ var _ = Describe("CreateAndWaitForNetworkInterfaces", Label(testlabels.VCSim), f
 					netInterface.Status.IPAssignmentMode = netopv1alpha1.NetworkInterfaceIPAssignmentModeStaticPool
 					netInterface.Status.IPConfigs = []netopv1alpha1.IPConfig{
 						{
-							IP:         "192.168.1.100",
-							IPFamily:   corev1.IPv4Protocol,
-							Gateway:    "192.168.1.1",
-							SubnetMask: "255.255.255.0",
+							IP:       "192.168.1.100",
+							IPFamily: corev1.IPv4Protocol,
+							Gateway:  "192.168.1.1",
+							Prefix:   ptr.To(int32(24)),
 						},
 						{
-							IP:         "192.168.1.101",
-							IPFamily:   corev1.IPv4Protocol,
-							Gateway:    "192.168.1.1",
-							SubnetMask: "255.255.255.0",
+							IP:       "192.168.1.101",
+							IPFamily: corev1.IPv4Protocol,
+							Gateway:  "192.168.1.1",
+							Prefix:   ptr.To(int32(24)),
 						},
 					}
 					netInterface.Status.Conditions = []netopv1alpha1.NetworkInterfaceCondition{
@@ -841,12 +841,14 @@ var _ = Describe("CreateAndWaitForNetworkInterfaces", Label(testlabels.VCSim), f
 							IPFamily:   corev1.IPv4Protocol,
 							Gateway:    "192.168.1.1",
 							SubnetMask: "255.255.255.0",
+							Prefix:     ptr.To(int32(24)),
 						},
 						{
 							IP:         "2001:db8::100",
 							IPFamily:   corev1.IPv6Protocol,
 							Gateway:    "2001:db8::1",
 							SubnetMask: "ffff:ffff:ffff:ffff::",
+							Prefix:     ptr.To(int32(64)),
 						},
 					}
 					netInterface.Status.Conditions = []netopv1alpha1.NetworkInterfaceCondition{
