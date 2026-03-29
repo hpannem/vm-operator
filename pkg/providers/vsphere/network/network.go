@@ -423,10 +423,6 @@ func createNetOPNetworkInterface(
 		}
 		// NetOP only defines a VMXNet3 type, but it doesn't really matter for our purposes.
 		netIf.Spec.Type = netopv1alpha1.NetworkInterfaceTypeVMXNet3
-		// Set IPFamilyPolicy if specified in the interface spec.
-		if interfaceSpec.IPFamilyPolicy != nil {
-			netIf.Spec.IPFamilyPolicy = netopv1alpha1.NetworkInterfaceIPFamilyPolicy(*interfaceSpec.IPFamilyPolicy)
-		}
 		return nil
 	})
 
@@ -467,7 +463,14 @@ func netOpNetIfToResult(
 		Backing:    object.NewDistributedVirtualPortgroup(vimClient, pgObjRef),
 	}
 
-	switch netIf.Status.IPAssignmentMode {
+	// When IPAssignmentMode is unset and no IPs are assigned, the API contract
+	// says to treat it as DHCP.
+	mode := netIf.Status.IPAssignmentMode
+	if mode == "" && len(netIf.Status.IPConfigs) == 0 {
+		mode = netopv1alpha1.NetworkInterfaceIPAssignmentModeDHCP
+	}
+
+	switch mode {
 	case netopv1alpha1.NetworkInterfaceIPAssignmentModeDHCP:
 		// When NetOP indicates DHCP, IPConfigs will be empty.
 		// Since NetOP doesn't distinguish between IPv4 and IPv6, set both.
