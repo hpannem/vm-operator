@@ -2399,21 +2399,102 @@ class SupervisorClient:
                 print(f"    Warning: could not delete VM '{name}': {e}")
 
 
+def _is_artifactory_url(base_url: str) -> bool:
+    path = urlparse(base_url).path
+    return "/artifactory/" in path or "/ui/native/" in path
+
+
+def _discover_ovfs_html(base_url: str) -> list[str]:
+    """
+    Discover OVF/OVA files from a plain HTTP directory listing (Apache/nginx).
+
+    Parses <a href> links recursively. Subdirectory links (ending in /) are
+    traversed; .ova/.ovf links are collected. Traversal is parallelised.
+    """
+    import html.parser
+
+    class _HrefParser(html.parser.HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.hrefs: list[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "a":
+                for name, val in attrs:
+                    if name == "href" and val:
+                        self.hrefs.append(val)
+
+    ovfs: list[str] = []
+    lock = threading.Lock()
+
+    def browse(url: str, executor: "concurrent.futures.ThreadPoolExecutor",
+               futures: list) -> None:
+        try:
+            r = requests.get(url, verify=False, timeout=30)
+            r.raise_for_status()
+            parser = _HrefParser()
+            parser.feed(r.text)
+            for href in parser.hrefs:
+                # Skip parent directory, query strings, anchors, and absolute
+                # links pointing elsewhere
+                if href.startswith("?") or href.startswith("#"):
+                    continue
+                if href in ("../", "./", "/"):
+                    continue
+                full = urljoin(url, href)
+                # Only follow links that stay within the original tree
+                if not full.startswith(url.rstrip("/").rsplit("/", 1)[0]):
+                    continue
+                if href.rstrip("/").endswith("/") or (
+                    not href.lower().endswith((".ova", ".ovf"))
+                    and not "." in href.split("/")[-1]
+                ):
+                    # looks like a subdirectory
+                    if full.rstrip("/") != url.rstrip("/"):
+                        f = executor.submit(browse, full.rstrip("/") + "/",
+                                            executor, futures)
+                        with lock:
+                            futures.append(f)
+                elif href.lower().endswith((".ova", ".ovf")) and not href.startswith("._"):
+                    with lock:
+                        ovfs.append(full)
+        except Exception as e:
+            print(f"  Warning: Could not browse {url}: {e}")
+
+    futures: list = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        futures.append(executor.submit(
+            browse, base_url.rstrip("/") + "/", executor, futures))
+        i = 0
+        while i < len(futures):
+            futures[i].result()
+            i += 1
+
+    return sorted(ovfs)
+
+
 def discover_ovfs(base_url: str) -> list[str]:
     """
-    Discover OVF/OVA files from an Artifactory repository URL.
+    Discover OVF/OVA files from a URL.
 
-    Uses the Artifactory UI native browser API which returns all entries
-    including remote/uncached ones that the storage API misses. Directory
-    traversal is parallelised with a thread pool for speed.
+    Supports two URL types:
+    - Artifactory repository URLs: uses the Artifactory UI native browser API
+      (fast, parallelised, handles remote/uncached entries).
+    - Plain HTTP directory listings (Apache/nginx, build servers): falls back
+      to recursive HTML <a href> crawling.
 
     Args:
-        base_url: Artifactory UI or download base URL (e.g. ending in testdata/)
+        base_url: Repository or directory listing base URL
 
     Returns:
         Sorted list of OVF/OVA download URLs
     """
     print(f"Discovering OVFs from {base_url}...")
+
+    if not _is_artifactory_url(base_url):
+        ovfs = _discover_ovfs_html(base_url)
+        print(f"  Found {len(ovfs)} OVF/OVA files")
+        return ovfs
 
     # Derive host and repo/path to build the UI native browser API URL.
     # Accepted input forms:

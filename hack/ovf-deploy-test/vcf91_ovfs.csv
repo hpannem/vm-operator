@@ -1,0 +1,28 @@
+# OVF deploy list - generated from http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish
+# Format: name,source[,config_file]
+VMware-Deep-Learning-VM-Image-nv_VMware-Deep-Learning-VM-Image-nv-9.1.0.0.25217931,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/DLVM/9.1.0.0/VMware-Deep-Learning-VM-Image-nv/VMware-Deep-Learning-VM-Image-nv-9.1.0.0.25217931.ovf
+DLVM_VMware-Deep-Learning-VM-Image-nv-9.1.0.0.25217931,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/DLVM/VMware-Deep-Learning-VM-Image-nv-9.1.0.0.25217931.ova
+dsm-va-9.1.0.0.25278525,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/DSM/dsm-va-9.1.0.0.25278525.ova
+hcx-unified-appliance-9.1.0.0.25289422,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/HCX/hcx-unified-appliance-9.1.0.0.25289422.ova
+controller-32.1.1-9126,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/NSX_ALB/controller-32.1.1-9126.ova
+nsx-edge-9.1.0.0.25289490,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/NSX_T_MANAGER/nsx-edge-9.1.0.0.25289490.ova
+nsx-unified-appliance-9.1.0.0.25289486,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/NSX_T_MANAGER/nsx-unified-appliance-9.1.0.0.25289486.ova
+VCF-SDDC-Manager-Appliance-9.1.0.0.25289913,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/SDDC_MANAGER_VCF/VCF-SDDC-Manager-Appliance-9.1.0.0.25289913.ova
+supervisor-9.1.0.0-25289882_photon-ova,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/SUPERVISOR/supervisor-9.1.0.0-25289882/photon-ova.ovf
+VMware-vCenter-Server-Appliance-9.1.0.0.25289882_OVF10,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VCENTER/VMware-vCenter-Server-Appliance-9.1.0.0.25289882_OVF10.ova
+Vcf-License-Server-9.1.0.0.25289910,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VCF_LICENSE_SERVER/Vcf-License-Server-9.1.0.0.25289910.ova
+Operations-Cloud-Proxy-9.1.0.0.25290492,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VCF_OPS_CLOUD_PROXY/Operations-Cloud-Proxy-9.1.0.0.25290492.ova
+ob-25164274-photon-5-amd64-v1.34.2---vmware.2-vkr.2_photon-ova,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VKR/ob-25164274-photon-5-amd64-v1.34.2---vmware.2-vkr.2/photon-ova.ovf
+ob-25164375-ubuntu-2404-amd64-v1.34.2---vmware.2-vkr.2_ubuntu-ova,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VKR/ob-25164375-ubuntu-2404-amd64-v1.34.2---vmware.2-vkr.2/ubuntu-ova.ovf
+ob-25164406-ubuntu-2204-amd64-v1.34.2---vmware.2-vkr.2_ubuntu-ova,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VKR/ob-25164406-ubuntu-2204-amd64-v1.34.2---vmware.2-vkr.2/ubuntu-ova.ovf
+Protection-and-recovery-9.1.0.0.25289820,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VLR/Protection-and-recovery-9.1.0.0.25289820.ova
+Protection-and-recovery-scale-out-9.1.0.0.25289820,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VLR/Protection-and-recovery-scale-out-9.1.0.0.25289820.ova
+Protection-and-Recovery-Proxy-9.1.0.0.25255537,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VLR_EDGE/Protection-and-Recovery-Proxy-9.1.0.0.25255537.ova
+VCF-Operations-for-networks-9.1.0.0.25289371-collector,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VRNI/VCF-Operations-for-networks-9.1.0.0.25289371-collector.ova
+VCF-Operations-for-networks-9.1.0.0.25289371-platform,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VRNI/VCF-Operations-for-networks-9.1.0.0.25289371-platform.ova
+O11N_VA-9.1.0.0.25290005,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VRO/O11N_VA-9.1.0.0.25290005.ova
+Operations-Appliance-9.1.0.0.25289898,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VROPS/Operations-Appliance-9.1.0.0.25289898.ova
+VMware-vSAN-ESA-Witness-9.1.0.0.25289892,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VSAN_ESA_WITNESS/VMware-vSAN-ESA-Witness-9.1.0.0.25289892.ova
+VMware-vSAN-File-Services-Appliance-9.1.0.0.25289892_OVF10,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VSAN_FILE_SERVICES/VMware-vSAN-File-Services-Appliance-9.1.0.0.25289892_OVF10.ovf
+VMware-VirtualSAN-Witness-9.1.0.0.25289892,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VSAN_OSA_WITNESS/VMware-VirtualSAN-Witness-9.1.0.0.25289892.ova
+vcf-services-platform-template-9.1.0.0.25288349,http://build-squid.vcfd.broadcom.net/build/mts/release/bora-25290490/publish/PROD/COMP/VSP/vcf-services-platform-template-9.1.0.0.25288349.ova

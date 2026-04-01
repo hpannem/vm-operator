@@ -1,71 +1,58 @@
 properties:
-  # === Networking Configuration ===
-  - key: guestinfo.cis.appliance.net.addr.family
-    value:
-      value: ipv4
-  - key: guestinfo.cis.appliance.net.mode
-    value:
-      value: static
-  # IPAddresses are in CIDR notation; V1alpha6_FormatIP with empty mask returns plain IP.
-  - key: guestinfo.cis.appliance.net.addr
-    value:
-      value: "{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) \"\" }}"
-  - key: guestinfo.cis.appliance.net.prefix
-    value:
-      value: "{{ V1alpha6_SubnetPrefixLength (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) }}"
-  - key: guestinfo.cis.appliance.net.gateway
-    value:
-      value: "{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}"
-  - key: guestinfo.cis.appliance.net.dns.servers
-    value:
-      value: "{{ V1alpha6_FormatNameservers -1 \",\" }}"
-  # pnid is the externally reachable IP/FQDN of this vCenter node.
-  - key: guestinfo.cis.appliance.net.pnid
-    value:
-      value: "{{ V1alpha6_FormatIP (index (index .V1alpha6.Net.Devices 0).IPAddresses 0) \"\" }}"
-
-  # === SSO Configuration ===
-  - key: guestinfo.cis.vmdir.password
-    value:
-      value: VMware1!VMware1!
-  - key: guestinfo.cis.vmdir.domain-name
-    value:
-      value: vsphere.local
-
-  # === System Configuration ===
-  - key: guestinfo.cis.appliance.root.passwd
-    value:
-      value: VMware1!VMware1!
-  - key: guestinfo.cis.tls_profile.name
-    value:
-      value: COMPATIBLE
-
-  # === Services Configuration ===
-  - key: guestinfo.cis.ceip_enabled
-    value:
-      value: 'False'
-  - key: guestinfo.cis.hadcs.enabled
-    value:
-      value: 'True'
-
-  # === Deployment Configuration (Fixed) ===
-  - key: guestinfo.cis.deployment.node.type
-    value:
-      value: embedded
-  - key: guestinfo.cis.vmdir.first-instance
-    value:
-      value: 'True'
-  - key: guestinfo.cis.db.type
-    value:
-      value: embedded
-  - key: guestinfo.cis.deployment.autoconfig
-    value:
-      value: 'True'
-
-  # === VAMI Properties ===
-  - key: domain
-    value:
-      value: lvn.broadcom.net
-  - key: searchpath
-    value:
-      value: lvn.broadcom.net
+- key: guestinfo.cis.appliance.net.addr.family
+  value:
+    value: ipv4
+- key: guestinfo.cis.appliance.net.mode
+  value:
+    value: static
+- key: guestinfo.cis.appliance.net.addr
+  value:
+    value: '{{ V1alpha6_FormatIP (V1alpha6_FirstIPFromNIC 0) "" }}'
+- key: guestinfo.cis.appliance.net.prefix
+  value:
+    value: '{{ V1alpha6_SubnetMask (V1alpha6_FirstIPFromNIC 0) }}'
+- key: guestinfo.cis.appliance.net.gateway
+  value:
+    value: '{{ (index .V1alpha6.Net.Devices 0).Gateway4 }}'
+- key: guestinfo.cis.appliance.net.dns.servers
+  value:
+    value: '{{ V1alpha6_FormatNameservers 1 " " }}'
+- key: guestinfo.cis.appliance.net.pnid
+  value:
+    value: '{{ V1alpha6_FormatIP (V1alpha6_FirstIPFromNIC 0) "" }}'
+- key: guestinfo.cis.deployment.node.type
+  value:
+    value: embedded
+- key: guestinfo.cis.vmdir.password
+  value:
+    value: VMware1!VMware1!
+- key: guestinfo.cis.vmdir.domain-name
+  value:
+    value: vsphere.local
+- key: guestinfo.cis.appliance.root.passwd
+  value:
+    value: VMware1!VMware1!
+- key: guestinfo.cis.tls_profile.name
+  value:
+    value: COMPATIBLE
+- key: guestinfo.cis.ceip_enabled
+  value:
+    value: "False"
+- key: guestinfo.cis.hadcs.enabled
+  value:
+    value: "True"
+- key: guestinfo.cis.vmdir.first-instance
+  value:
+    value: "True"
+- key: guestinfo.cis.db.type
+  value:
+    value: embedded
+- key: guestinfo.cis.deployment.autoconfig
+  value:
+    value: "True"
+- key: domain
+  value:
+    value: lvn.broadcom.net
+- key: searchpath
+  value:
+    value: lvn.broadcom.net
