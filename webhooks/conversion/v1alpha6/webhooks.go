@@ -9,104 +9,93 @@ import (
 	ctrlmgr "sigs.k8s.io/controller-runtime/pkg/manager"
 
 	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha6"
+	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
 	pkgctx "github.com/vmware-tanzu/vm-operator/pkg/context"
 )
 
 func AddToManager(ctx *pkgctx.ControllerManagerContext, mgr ctrlmgr.Manager) error {
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.ClusterVirtualMachineImage{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.ClusterVirtualMachineImage{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachine{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachine{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineClass{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineClass{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineClassInstance{}).
+	if pkgcfg.FromContext(ctx).Features.ImmutableClasses {
+		if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineClassInstance{}).
+		Complete(); err != nil {
+
+			return err
+		}
+	}
+
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineGroup{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineGroup{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineGroupPublishRequest{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineGroupPublishRequest{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineImage{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineImage{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineImageCache{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineImageCache{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachinePublishRequest{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachinePublishRequest{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineReplicaSet{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineReplicaSet{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineService{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineService{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineSetResourcePolicy{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineSetResourcePolicy{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineSnapshot{}).
 		Complete(); err != nil {
 
 		return err
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineSnapshot{}).
-		Complete(); err != nil {
-
-		return err
-	}
-
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&vmopv1.VirtualMachineWebConsoleRequest{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &vmopv1.VirtualMachineWebConsoleRequest{}).
 		Complete(); err != nil {
 
 		return err

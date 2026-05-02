@@ -201,7 +201,8 @@ type FeatureStates struct {
 	AllDisksArePVCs             bool
 	VMAffinityDuringExecution   bool
 	StoragePolicyMutability     bool
-	VMExtraConfig               bool
+	VMVlanSubinterface          bool
+	TelcoVMServiceAPI           bool
 }
 
 type InstanceStorage struct {
