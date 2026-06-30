@@ -11,16 +11,17 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	vimtypes "github.com/vmware/govmomi/vim25/types"
 	"github.com/vmware/govmomi/vim25/mo"
+	vimtypes "github.com/vmware/govmomi/vim25/types"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha6"
 	vmopv1common "github.com/vmware-tanzu/vm-operator/api/v1alpha6/common"
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
-	"github.com/vmware-tanzu/vm-operator/pkg/vmconfig/networkextraconfig"
+	pkgerr "github.com/vmware-tanzu/vm-operator/pkg/errors"
 	"github.com/vmware-tanzu/vm-operator/pkg/util/ptr"
+	"github.com/vmware-tanzu/vm-operator/pkg/vmconfig/networkextraconfig"
 )
 
 var errFake = errors.New("fake error")
@@ -404,6 +405,15 @@ var _ = Describe("networkextraconfig.OnResult", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(string(cond.Status)).To(Equal("False"))
 			Expect(cond.Reason).To(Equal(vmopv1.VirtualMachineNetworkErrorReason))
+		})
+	})
+
+	Context("with a NoRequeueNoErr sentinel (e.g. ErrCreate, ErrHasTask)", func() {
+		It("does not mark condition false", func() {
+			Expect(r.OnResult(ctx, vm, moVM, pkgerr.NoRequeueNoErr("created vm"))).To(Succeed())
+			cond := findCondition(vm)
+			Expect(cond).NotTo(BeNil())
+			Expect(string(cond.Status)).To(Equal("True"))
 		})
 	})
 

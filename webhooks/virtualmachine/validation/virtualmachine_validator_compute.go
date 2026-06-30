@@ -187,11 +187,11 @@ func validateComputeLatencySensitivity(specPath *field.Path, vm *vmopv1.VirtualM
 	}
 
 	var (
-		allErrs field.ErrorList
-		lsPath  = specPath.Child("cpuAdvanced").Child("latencySensitivity")
+		allErrs   field.ErrorList
+		resources = vm.Spec.Resources
+		lsPath    = specPath.Child("cpuAdvanced").Child("latencySensitivity")
 	)
 
-	// Full memory reservation: reservationLockedToMax or requests.memory == size.memory.
 	if !vmopv1util.FullMemReservationSpecMet(vm) {
 		allErrs = append(allErrs, field.Invalid(lsPath, string(ls),
 			"requires full memory reservation: "+
@@ -203,7 +203,6 @@ func validateComputeLatencySensitivity(specPath *field.Path, vm *vmopv1.VirtualM
 	// The webhook cannot verify the exact MHz value equals 100% of vCPU
 	// capacity (which depends on host CPU speed at placement time), so it
 	// only checks that a non-zero reservation is explicitly provided.
-	resources := vm.Spec.Resources
 	cpuReservationMet := resources != nil &&
 		resources.Requests != nil &&
 		resources.Requests.CPU != nil &&

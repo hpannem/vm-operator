@@ -20,6 +20,7 @@ import (
 	"github.com/vmware-tanzu/vm-operator/pkg/conditions"
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
 	ctxgen "github.com/vmware-tanzu/vm-operator/pkg/context/generic"
+	pkgerr "github.com/vmware-tanzu/vm-operator/pkg/errors"
 	pkglog "github.com/vmware-tanzu/vm-operator/pkg/log"
 	vsphereconst "github.com/vmware-tanzu/vm-operator/pkg/providers/vsphere/constants"
 	"github.com/vmware-tanzu/vm-operator/pkg/providers/vsphere/virtualmachine/extraconfig"
@@ -235,7 +236,7 @@ func (r reconciler) OnResult(
 
 	s := ctxgen.FromContext(ctx, contextKeyValue, func(s state) state { return s })
 
-	if resultErr != nil {
+	if resultErr != nil && !pkgerr.IsNoRequeueNoError(resultErr) {
 		conditions.MarkFalse(
 			vm,
 			vmopv1.VirtualMachineNetworkConfigSynced,

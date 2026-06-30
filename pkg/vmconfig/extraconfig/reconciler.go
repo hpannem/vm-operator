@@ -19,6 +19,7 @@ import (
 	vmopv1common "github.com/vmware-tanzu/vm-operator/api/v1alpha6/common"
 	"github.com/vmware-tanzu/vm-operator/pkg/conditions"
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
+	pkgerr "github.com/vmware-tanzu/vm-operator/pkg/errors"
 	ctxgen "github.com/vmware-tanzu/vm-operator/pkg/context/generic"
 	vsphereconst "github.com/vmware-tanzu/vm-operator/pkg/providers/vsphere/constants"
 	"github.com/vmware-tanzu/vm-operator/pkg/providers/vsphere/virtualmachine/extraconfig"
@@ -248,7 +249,7 @@ func (r reconciler) OnResult(
 	s := ctxgen.FromContext(ctx, contextKeyValue, func(s state) state { return s })
 
 	// On task error, mark condition false and bail.
-	if resultErr != nil {
+	if resultErr != nil && !pkgerr.IsNoRequeueNoError(resultErr) {
 		conditions.MarkFalse(
 			vm,
 			vmopv1.VirtualMachineExtraConfigSynced,
