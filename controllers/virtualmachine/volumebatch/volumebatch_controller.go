@@ -8,8 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -616,6 +618,20 @@ func (r *Reconciler) getPVC(
 func (r *Reconciler) createOrUpdateBatchAttachment(
 	ctx *pkgctx.VolumeContext,
 	volumeSpecs []cnsv1alpha1.VolumeSpec) error {
+
+	// DEBUG ONLY - reproduction aid for the race fixed by PR #1572. Widens the
+	// window during which CnsNodeVMBatchAttachment.Spec.Volumes is stale by
+	// delaying the write, so a forced CSI resync (e.g. bouncing the syncer
+	// pod) during the sleep reliably observes the incomplete spec. Remove
+	// before shipping this image anywhere durable.
+	if d := os.Getenv("VMOP_DEBUG_BATCHATTACH_DELAY"); d != "" {
+		if dur, err := time.ParseDuration(d); err == nil && dur > 0 {
+			ctx.Logger.Info(
+				"VMOP_DEBUG_BATCHATTACH_DELAY set, sleeping before persisting CnsNodeVMBatchAttachment",
+				"delay", dur, "vm", ctx.VM.Name)
+			time.Sleep(dur)
+		}
+	}
 
 	// Validate the volume specs before attempting to create/update
 	if err := r.validateVolumeSpecs(ctx, volumeSpecs); err != nil {
