@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -68,6 +69,26 @@ func ReconcileSchemaUpgrade(
 	)
 
 	logger.V(4).Info("Reconciling schema upgrade for VM")
+
+	// DEBUG ONLY - reproduction aid for the race fixed by PR #1572. The
+	// AllDisksArePVCs feature-version bit is normally monotonic (a
+	// validating webhook blocks clearing it via the API), which makes it
+	// impossible to re-trigger unmanaged-disk backfill/register on a VM
+	// that's already marked upgraded. When set, this clears just that bit
+	// before the upgrade check below, so this VM is always treated as
+	// needing that backfill/register reconcile, exactly as a genuinely
+	// pre-upgrade VM would be. Remove before shipping this image anywhere
+	// durable.
+	if os.Getenv("VMOP_DEBUG_FORCE_ALLDISKSAREPVCS_BACKFILL") != "" {
+		fv := vmopv1util.ParseFeatureVersion(
+			vm.Annotations[pkgconst.UpgradedToFeatureVersionAnnotationKey])
+		fv &^= vmopv1util.FeatureVersionAllDisksArePVCs
+		vm.SetAnnotation(
+			pkgconst.UpgradedToFeatureVersionAnnotationKey, fv.String())
+		logger.Info(
+			"VMOP_DEBUG_FORCE_ALLDISKSAREPVCS_BACKFILL set, cleared AllDisksArePVCs feature-version bit",
+			"vm", vm.Name, "featureVersion", fv.String())
+	}
 
 	if err := vmopv1util.IsObjectUpgraded(ctx, vm); err != nil {
 		logger.Info("Upgrading VM", "reason", err.Error())
